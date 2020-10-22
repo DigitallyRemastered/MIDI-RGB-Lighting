@@ -1,6 +1,8 @@
 # MIDI-RGB-Lighting
 Control individually addressable LEDs using the FastLED library and USB MIDI using the Teensy 3.6
 
+See a demo and video of construction here: https://www.youtube.com/watch?v=1hBeVJ6QlaU
+
 ## Requirements: 
 
 Requires a Teensy device. I am using a Teensy 3.6. I programmed it via Teensyduino configuring as a USBMIDI device:
