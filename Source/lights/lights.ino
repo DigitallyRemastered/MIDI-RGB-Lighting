@@ -15,7 +15,7 @@
   In order to make it more visually interesting, I've incorporated the concept of a foreground and
   a background. We'll call them layers. If the foreground doesn't make use of all of the lights,
   then the background will cover the rest. This way, you can control two sets of patterns simultaneously
-  and independently. It's possible to do more patterns than this, but having an foreground an background
+  and independently. It's possible to do more patterns than this, but having a foreground and background
   seemed intuitive and  manageable.
 
   Global variables are bytes since MIDI standard only allows numbers between 0 and 127 to be transmitted.
@@ -28,7 +28,7 @@
   ffBright    |       3        | foreground layer brightness
   ffLedStart  |       4        | foreground layer start position of LED
   ffLedLength |       5        | foreground layer length of a line of LEDs
-  ffMode      |       6        | foreground layer mode (0-8)
+  ffMode      |       6        | foreground layer mode (0-9)
     // 0: notes2MIDIChannel
     // 1: rainbow wheel
     // 2: moving dots
@@ -81,25 +81,25 @@ byte cAmp = 0;
 
 //Constants
 
-const byte  rainbowInc = 255 / NUM_LEDS; // for rainbow wheel
+const byte  RAINBOW_INC = 255 / NUM_LEDS; // for rainbow wheel
 
 //Represents a sin wave for the color sinusoid. 100sin(theta)+0
-const int cphase[] = {10, 20,  29,  38, 47,  56,  63,  71,  77,  83,  88,  92,  96,  98,  100,  100,
+const int COLOR_PHASE[] = {10, 20,  29,  38, 47,  56,  63,  71,  77,  83,  88,  92,  96,  98,  100,  100,
                       100,  98,  96,  92,  88,  83,  77,  71,  63,  56,  47,  38,  29,  20,  10,  0,
                       -10, -20, -29, -38, -47, -56, -63, -71, -77, -83, -88, -92, -96, -98, -100, -100,
                       -100, -98, -96, -92, -88, -83, -77, -71, -63, -56, -47, -38, -29, -20, -10, 0
                      };
 
 //Using a LUT of LED positions for the stadium cameras mode
-byte randLEDs[] = {18, 43, 26, 27, 32, 19, 13, 82, 0, 24, 1, 19, 80, 80, 76, 53, 82, 64, 92, 90, 22, 84, 80, 67, 61, 74, 10, 36, 38,
+byte RANDOM_LEDS[] = {18, 43, 26, 27, 32, 19, 13, 82, 0, 24, 1, 19, 80, 80, 76, 53, 82, 64, 92, 90, 22, 84, 80, 67, 61, 74, 10, 36, 38,
                    35, 7, 92, 31, 91, 61, 55, 23, 45, 66, 58, 92, 75, 67, 63, 8, 67, 71, 17, 66, 64, 17, 76, 37, 75, 62, 73, 66, 6, 52,
                    0, 95, 29, 43, 3, 53, 18, 58, 52, 18, 8, 13, 43, 20, 69, 68, 89, 25, 75, 28, 45, 49, 69, 60, 95, 26, 30, 95, 58, 8,
                    76, 29, 47, 39, 6, 58, 53
                   };
 
 //Using a 2D array LUT of LED positions that match up to the width of floppy drives with corresponding MIDI channel
-// chan2led[MIDI Channel][led along width of drive]
-byte chan2led[][6] =
+// CHANNEL_TO_LED[MIDI Channel][led along width of drive]
+byte CHANNEL_TO_LED[][6] =
 { {0, 0, 0, 0, 0, 0},
   {19, 20, 21, 22, 23, 24},
   {29, 30, 31, 32, 33, 34},
@@ -120,7 +120,7 @@ byte chan2led[][6] =
 
 };
 
-byte t2bconv[] = {23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+byte TOP_BOTTOM_MIRROR_MAP[] = {23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
                   95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 77, 76, 75, 74, 73, 72
                  };
 
@@ -129,27 +129,14 @@ void setup() {
 
   usbMIDI.setHandleNoteOff(OnNoteOff);
   usbMIDI.setHandleNoteOn(OnNoteOn);
-  //  usbMIDI.setHandlePitchChange(OnPitchChange);
   usbMIDI.setHandleControlChange(OnControlChange);
 
-
   Serial.begin(250000);
-
 
   for (int led = 0; led < 108; led++) {
     if (led % 2 == 0) leds[led] = CHSV(80, 200, ffBright);
     else                  leds[led] = CHSV(100, 200, ffBright);
   }
-
-//  for (int channel = 1; channel < 17; channel += 1) {
-//    for (byte driveLED = 0; driveLED < 6; driveLED++) {
-//      Serial.print(chan2led[channel][driveLED] + 48); Serial.print(" ,");
-//      if (driveLED % 2 == 0) leds[chan2led[channel][driveLED]] = CHSV(80, 200, ffBright);
-//      else                  leds[chan2led[channel][driveLED]] = CHSV(100, 200, ffBright);
-//    }
-//    Serial.println();
-//  }
-
 }
 
 void loop() {
@@ -160,15 +147,13 @@ void loop() {
   }
 }
 
-
-
 void OnNoteOn(byte channel, byte note, byte velocity) {
   currentNote[channel] = note;
 
   switch (ffMode) {
     case 0:
       for (byte driveLED = 0; driveLED < 6; driveLED++) {
-        leds[chan2led[channel][driveLED]] = CHSV(ffHue, ffSat, ffBright);
+        leds[CHANNEL_TO_LED[channel][driveLED]] = CHSV(ffHue, ffSat, ffBright);
       }
       break;
     case 5:
@@ -180,7 +165,7 @@ void OnNoteOn(byte channel, byte note, byte velocity) {
       }
       for (byte line = 0; line < lines; line++) {
         for (byte led = ffLedStart; led < ffLedStart + ffLedLength; led++) {
-          leds[(led + line * lineOffset) % NUM_LEDS] = CHSV((ffHue + led * rainbowInc) % 255, ffSat, ffBright);
+          leds[(led + line * lineOffset) % NUM_LEDS] = CHSV((ffHue + led * RAINBOW_INC) % 255, ffSat, ffBright);
         }
       }
       break;
@@ -193,8 +178,8 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
     if (currentNote[channel] == note) {
       currentNote[channel] = 0;
       for (byte driveLED = 0; driveLED < 6; driveLED++) {
-        if (driveLED % 2 == 0) leds[chan2led[channel][driveLED]] = CHSV(80, 200, ffBright);
-        else                  leds[chan2led[channel][driveLED]] = CHSV(100, 200, ffBright);
+        if (driveLED % 2 == 0) leds[CHANNEL_TO_LED[channel][driveLED]] = CHSV(80, 200, ffBright);
+        else                  leds[CHANNEL_TO_LED[channel][driveLED]] = CHSV(100, 200, ffBright);
       }
     }
   }
@@ -242,7 +227,7 @@ void OnControlChange(byte channel, byte control, byte value) {
   switch (ffMode) {
     case 1: //rainbow wheel
       for (int led = 0; led < NUM_LEDS; led += 1) {
-        leds[led] = CHSV((ffHue + led * rainbowInc), ffSat, ffBright);
+        leds[led] = CHSV((ffHue + led * RAINBOW_INC), ffSat, ffBright);
       }
       break;
     //---------------------------------------------------------------
@@ -280,14 +265,14 @@ void OnControlChange(byte channel, byte control, byte value) {
     case 6:// color sinusoid
       for (int led = 0; led < NUM_LEDS; led += 1) {
         byte cphaseIdx = ((led + ffLedStart) * 64 / ffLedLength) % 64;
-        byte h = (256 + ffHue + cAmp * cphase[cphaseIdx] / 100) % 256;
+        byte h = (256 + ffHue + cAmp * COLOR_PHASE[cphaseIdx] / 100) % 256;
         leds[led] = CHSV(h, ffSat, ffBright);
       }
       break;
     //---------------------------------------------------------------
     case 7:// Flash lights
       updateBG();
-      //leds[randLEDs[ffLedStart]] = CHSV(ffHue, ffSat, ffBright);
+      //leds[RANDOM_LEDS[ffLedStart]] = CHSV(ffHue, ffSat, ffBright);
       leds[random(NUM_LEDS)] = CHSV(ffHue, ffSat, ffBright);
       break;
     //---------------------------------------------------------------
@@ -295,7 +280,7 @@ void OnControlChange(byte channel, byte control, byte value) {
       updateBG();
 
       tMiddle = (NUM_LEDS / 2 - 1) * pan / 127 + NUM_LEDS / 4; // if Pan is 1, tmWave is 0, the right side of
-      //int bMiddle =  t2bconv[tMiddle-24];
+      //int bMiddle =  TOP_BOTTOM_MIRROR_MAP[tMiddle-24];
       amp = ffLedLength / 2;
 
       if (tMiddle - amp <= 24) {
@@ -308,8 +293,8 @@ void OnControlChange(byte channel, byte control, byte value) {
       for (byte p = 0; p < amp; p++) {
         leds[tMiddle + p] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
         leds[tMiddle - p] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
-        leds[t2bconv[tMiddle + p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
-        leds[t2bconv[tMiddle - p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
+        leds[TOP_BOTTOM_MIRROR_MAP[tMiddle + p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
+        leds[TOP_BOTTOM_MIRROR_MAP[tMiddle - p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
       }
       break;
     //---------------------------------------------------------------
@@ -317,7 +302,7 @@ void OnControlChange(byte channel, byte control, byte value) {
       updateBG();
 
       tMiddle = (NUM_LEDS / 2 - 1) * pan / 127 + NUM_LEDS / 4; // if Pan is 1, tmWave is 0, the right side of
-      //int bMiddle =  t2bconv[tMiddle-24];
+      //int bMiddle =  TOP_BOTTOM_MIRROR_MAP[tMiddle-24];
       amp = ffLedLength / 2;
 
       if (tMiddle - amp <= 24) {
@@ -330,8 +315,8 @@ void OnControlChange(byte channel, byte control, byte value) {
       for (byte p = 0; p <= amp; p++) {
         leds[tMiddle + p] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
         leds[tMiddle - p] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
-        leds[t2bconv[(NUM_LEDS - tMiddle) + p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
-        leds[t2bconv[(NUM_LEDS - tMiddle) - p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
+        leds[TOP_BOTTOM_MIRROR_MAP[(NUM_LEDS - tMiddle) + p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
+        leds[TOP_BOTTOM_MIRROR_MAP[(NUM_LEDS - tMiddle) - p - 24]] = CHSV( ffHue, ffSat, ffBright * (amp - p) / amp);
       }
       break;
     //---------------------------------------------------------------
@@ -349,13 +334,13 @@ void updateBG() {
       break;
     case 1:// Rainbow Circle
       for (int led = 0; led < NUM_LEDS; led += 1) {
-        leds[led] = CHSV((bgHue + led * rainbowInc), bgSat, bgBright);
+        leds[led] = CHSV((bgHue + led * RAINBOW_INC), bgSat, bgBright);
       }
       break;
     case 2:// Color Sinusoid
       for (int led = 0; led < NUM_LEDS; led += 1) {
         byte cphaseIdx = ((led + bgLedStart) * 64 / bgLedLength) % 64;
-        byte h = (256 + bgHue + cAmp * cphase[cphaseIdx] / 100) % 256;
+        byte h = (256 + bgHue + cAmp * COLOR_PHASE[cphaseIdx] / 100) % 256;
         leds[led] = CHSV(h, bgSat, bgBright);
       }
       break;
@@ -372,22 +357,4 @@ void lightsOut() {
   for (int led = 0; led < NUM_LEDS; led += 1) {
     leds[led] = CHSV(ffHue, ffSat, 0);
   }
-}
-
-
-void OnPitchChange(byte channel, int pitch) {
-  //  pitch = pitch / 100;
-
-  //  if (abs(pitch) > 3) {
-  //    bend[channel] = true;
-  //  }
-  //  else {
-  //    bend[channel] = false;
-  //  }
-
-  Serial.println(pitch);
-}
-
-void processLights() {
-  Serial.println("la");
 }
