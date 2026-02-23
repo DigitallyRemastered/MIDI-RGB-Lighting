@@ -7,9 +7,9 @@
   Concepts: Void loop will write messages to the lights at a frequency of 1/33,333e-6s = ~30Hz
   Between writes to the data line, the HSV of each light is determined by midi event handlers
   OnNoteOn, OnNoteOff, and (most usually) OnControlChange. On Control change is used to directly
-  set the value of several global variables as described at the bottom. The global parameters are used
-  differently or ignored depending on the mode - the parameter with the most effect on how LEDs are displayed.
-  Several modes have been programmed - Their names are given in the OnControlChange function, but
+  set the value of several global variables. The global parameters are used differently or ignored
+  depending on the mode - the parameter with the most effect on how LEDs are displayed.
+  Several modes have been programmed - Their names are given in the mode annotations, but
   the best way to figure out what they do is to try them out!
 
   In order to make it more visually interesting, I've incorporated the concept of a foreground and
@@ -18,39 +18,31 @@
   and independently. It's possible to do more patterns than this, but having a foreground and background
   seemed intuitive and  manageable.
 
-  Global variables are bytes since MIDI standard only allows numbers between 0 and 127 to be transmitted.
-  some variables don't make use of all 127 values, i.e. ffMode has 9 values - 0,1,2,3,4,5,6,7,8
-  These variables generally control these aspects of the LEDs:
+  Structured Comment Schema:
+  This file uses structured comments to define MIDI parameters and modes. A Python script (generate_csv.py)
+  parses these comments to automatically generate the Template.csv file for FL Studio.
 
-  Parameter   | MIDI Control # | Description
-  ffHue       |       1        | foreground layer hue
-  ffSat       |       2        | foreground layer saturation
-  ffBright    |       3        | foreground layer brightness
-  ffLedStart  |       4        | foreground layer start position of LED
-  ffLedLength |       5        | foreground layer length of a line of LEDs
-  ffMode      |       6        | foreground layer mode (0-9)
-    // 0: notes2MIDIChannel
-    // 1: rainbow wheel
-    // 2: moving dots
-    // 3: comets
-    // 4: back and forth
-    // 5: Move startLED with each note on event
-    // 6: Color Sinusoid
-    // 7: Stadium Camera flashes
-    // 8: Ocean waves
-    // 9: Opposed Ocean waves
-  lines       |       7        | foreground layer number of LED lines
-  cAmp        |       8        | foreground and background layer color Amplitude for use in color sinusoid mode (my favorite)
-  bgMode      |       9        | background layer mode (0-2)
-    //0: Flat Color background
-    //1: rainbow wheel background
-    //2: Color Sinusoid
-  pan         |      10        | used in ffMode "Ocean Waves"
-  bgHue       |      11        | background layer hue
-  bgSat       |      12        | background layer sat
-  bgBright    |      13        | background layer brightness
-  bgLedStart  |      14        | background layer start position of LED
-  bgLedLength |      15        | background layer length of line of LEDs
+  Parameter Metadata Format:
+  \**
+   * @param DisplayName
+   * @cc N
+   * @layer Foreground|Background|Shared
+   * @tooltip Description text for the parameter
+   *\
+  type varName = defaultValue;
+
+  Mode Selector Format (for ffMode and bgMode):
+  \**
+   * @param DisplayName
+   * @cc N
+   * @modes 0:ModeName0,1:ModeName1,2:ModeName2,...
+   *\
+  byte varName = 0;
+
+  Mode Annotation Format (in switch case statements):
+  case N: // @mode ModeName @uses var1,var2,var3
+
+  To regenerate Template.csv after adding parameters or modes, run: python generate_csv.py
 */
 
 #include <FastLED.h>
@@ -61,43 +53,160 @@ CRGB leds[NUM_LEDS];
 
 elapsedMicros t;
 
-byte currentNote[] = {LOW, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-int ffBright = 200;
-int bgBright = 0;
+// ============================================================================
+// MIDI-Controlled Parameters (CC 1-15)
+// These variables are controlled via MIDI Control Change messages
+// ============================================================================
+
+/**
+ * @param Hue
+ * @cc 1
+ * @layer Foreground
+ * @tooltip Sets color [roygbivmr]. Cyclic (min val = max val)
+ */
 int ffHue = 0;
-int bgHue = 0;
+
+/**
+ * @param Saturation
+ * @cc 2
+ * @layer Foreground
+ * @tooltip Sets saturation [white, chosen hue]
+ */
 int ffSat = 200;
-int bgSat = 200;
+
+/**
+ * @param Brightness
+ * @cc 3
+ * @layer Foreground
+ * @tooltip Sets intensity [LED off, LED on]
+ */
+int ffBright = 200;
+
+/**
+ * @param Start
+ * @cc 4
+ * @layer Foreground
+ * @tooltip start position of line
+ */
 int ffLedStart = 0;
-int bgLedStart = 0;
+
+/**
+ * @param Length
+ * @cc 5
+ * @layer Foreground
+ * @tooltip length of line
+ */
 int ffLedLength = 0;
-int bgLedLength = 0;
-int pan = 64;
+
+/**
+ * @param Foreground
+ * @cc 6
+ * @modes 0:Notes to Drives,1:Rainbow Wheel,2:Moving Dots,3:Comets,4:Back and Forth,5:Move startLED with each note on event,6:Color Sinusoid,7:Flash Lights,8:Ocean Waves,9:Opposing Waves
+ */
 byte ffMode = 0;
-byte bgMode = 0;
+
+/**
+ * @param Number of Lines
+ * @cc 7
+ * @layer Foreground
+ * @tooltip Number of lines
+ */
 byte lines = 0;
-int lineOffset;
+
+/**
+ * @param Color Amplitude
+ * @cc 8
+ * @layer Shared
+ * @tooltip color Amplitude for color sinusoid
+ */
 byte cAmp = 0;
 
-//Constants
+/**
+ * @param Background
+ * @cc 9
+ * @modes 0:Flat Color background,1:rainbow wheel background,2:Color Sinusoid
+ */
+byte bgMode = 0;
 
-const byte  RAINBOW_INC = 255 / NUM_LEDS; // for rainbow wheel
+/**
+ * @param Pan
+ * @cc 10
+ * @layer Foreground
+ * @tooltip Pan position for wave effects
+ */
+int pan = 64;
 
-//Represents a sin wave for the color sinusoid. 100sin(theta)+0
+/**
+ * @param Hue
+ * @cc 11
+ * @layer Background
+ * @tooltip Sets color [roygbivmr]. Cyclic (min val = max val)
+ */
+int bgHue = 0;
+
+/**
+ * @param Saturation
+ * @cc 12
+ * @layer Background
+ * @tooltip Sets saturation [white, chosen hue]
+ */
+int bgSat = 200;
+
+/**
+ * @param Brightness
+ * @cc 13
+ * @layer Background
+ * @tooltip Sets intensity [LED off, LED on]
+ */
+int bgBright = 0;
+
+/**
+ * @param Start
+ * @cc 14
+ * @layer Background
+ * @tooltip start position of line
+ */
+int bgLedStart = 0;
+
+/**
+ * @param Length
+ * @cc 15
+ * @layer Background
+ * @tooltip length of line
+ */
+int bgLedLength = 0;
+
+// ============================================================================
+// Helper Variables (not MIDI-controlled)
+// ============================================================================
+
+byte currentNote[] = {LOW, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+int lineOffset;
+
+// ============================================================================
+// Constants and Lookup Tables
+// ============================================================================
+
+// Hue increment per LED for rainbow wheel effect
+const byte RAINBOW_INC = 255 / NUM_LEDS;
+
+// Lookup table: 64-element discretized sine wave [-100,100] for color sinusoid mode
+// Represents 100*sin(theta) where theta ranges from 0 to 2*pi
 const int COLOR_PHASE[] = {10, 20,  29,  38, 47,  56,  63,  71,  77,  83,  88,  92,  96,  98,  100,  100,
                       100,  98,  96,  92,  88,  83,  77,  71,  63,  56,  47,  38,  29,  20,  10,  0,
                       -10, -20, -29, -38, -47, -56, -63, -71, -77, -83, -88, -92, -96, -98, -100, -100,
                       -100, -98, -96, -92, -88, -83, -77, -71, -63, -56, -47, -38, -29, -20, -10, 0
                      };
 
-//Using a LUT of LED positions for the stadium cameras mode
+// Random LED position lookup table for Flash Lights mode (legacy, currently unused - random() used instead)
 byte RANDOM_LEDS[] = {18, 43, 26, 27, 32, 19, 13, 82, 0, 24, 1, 19, 80, 80, 76, 53, 82, 64, 92, 90, 22, 84, 80, 67, 61, 74, 10, 36, 38,
                    35, 7, 92, 31, 91, 61, 55, 23, 45, 66, 58, 92, 75, 67, 63, 8, 67, 71, 17, 66, 64, 17, 76, 37, 75, 62, 73, 66, 6, 52,
                    0, 95, 29, 43, 3, 53, 18, 58, 52, 18, 8, 13, 43, 20, 69, 68, 89, 25, 75, 28, 45, 49, 69, 60, 95, 26, 30, 95, 58, 8,
                    76, 29, 47, 39, 6, 58, 53
                   };
 
-//Using a 2D array LUT of LED positions that match up to the width of floppy drives with corresponding MIDI channel
+// Maps MIDI channels (1-16) to LED indices for Notes to Drives mode
+// Each floppy drive has 6 LEDs controlled by one MIDI channel
 // CHANNEL_TO_LED[MIDI Channel][led along width of drive]
 byte CHANNEL_TO_LED[][6] =
 { {0, 0, 0, 0, 0, 0},
@@ -120,6 +229,8 @@ byte CHANNEL_TO_LED[][6] =
 
 };
 
+// Mirrors top strip (LEDs 0-23) and bottom strip (LEDs 72-95) for Ocean Waves modes
+// Used to create symmetric wave effects on top and bottom LED strips
 byte TOP_BOTTOM_MIRROR_MAP[] = {23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
                   95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 77, 76, 75, 74, 73, 72
                  };
@@ -151,12 +262,12 @@ void OnNoteOn(byte channel, byte note, byte velocity) {
   currentNote[channel] = note;
 
   switch (ffMode) {
-    case 0:
+    case 0: // @mode Notes to Drives @uses ffHue,ffSat,ffBright
       for (byte driveLED = 0; driveLED < 6; driveLED++) {
         leds[CHANNEL_TO_LED[channel][driveLED]] = CHSV(ffHue, ffSat, ffBright);
       }
       break;
-    case 5:
+    case 5: // @mode Move startLED with each note on event @uses ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines
       ffLedStart += 1;
       lineOffset = NUM_LEDS / lines;
       //start from a clean slate
@@ -196,15 +307,6 @@ void OnControlChange(byte channel, byte control, byte value) {
     case 4: ffLedStart = value; break;
     case 5: ffLedLength = value; break;
     case 6: ffMode = value; break;
-    // 0: notes to drives
-    // 1: rainbow wheel
-    // 2: moving dots
-    // 3: comets
-    // 4: back and forth
-    // 5: Move startLED with each note on event
-    // 6: Color Sinusoid
-    // 7: Flash Lights
-    // 8: Ocean waves
     case 7: lines = value; break;
     case 8: cAmp = value; break;
     case 9: bgMode = value; break;
@@ -214,9 +316,6 @@ void OnControlChange(byte channel, byte control, byte value) {
     case 13: bgBright = 2 * value; break;
     case 14: bgLedStart = value; break;
     case 15: bgLedLength = value; break;
-    //0: Flat Color background
-    //1: rainbow wheel background
-    //2: Color Sinusoid
     default:  break;
   }
 
@@ -225,13 +324,13 @@ void OnControlChange(byte channel, byte control, byte value) {
 
   //depending on the value of the mode knob
   switch (ffMode) {
-    case 1: //rainbow wheel
+    case 1: // @mode Rainbow Wheel @uses ffHue,ffSat,ffBright
       for (int led = 0; led < NUM_LEDS; led += 1) {
         leds[led] = CHSV((ffHue + led * RAINBOW_INC), ffSat, ffBright);
       }
       break;
     //---------------------------------------------------------------
-    case 2://moving dots
+    case 2: // @mode Moving Dots @uses ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines
       lineOffset = NUM_LEDS / lines;
       updateBG();
       for (byte line = 0; line < lines; line++) {
@@ -241,7 +340,7 @@ void OnControlChange(byte channel, byte control, byte value) {
       }
       break;
     //---------------------------------------------------------------
-    case 3://comet
+    case 3: // @mode Comets @uses ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines
       lineOffset = NUM_LEDS / lines;
       updateBG();
       for (byte line = 0; line < lines; line++) {
@@ -253,7 +352,7 @@ void OnControlChange(byte channel, byte control, byte value) {
       }
       break;
     //---------------------------------------------------------------
-    case 4://back and forth
+    case 4: // @mode Back and Forth @uses ffHue,ffSat,ffBright,ffLedStart,ffLedLength
       updateBG();
       for (int block = 0; block < NUM_LEDS; block += 2 * ffLedLength) {
         for (int led = 0; led < ffLedLength; led++) {
@@ -262,7 +361,7 @@ void OnControlChange(byte channel, byte control, byte value) {
       }
       break;
     //---------------------------------------------------------------
-    case 6:// color sinusoid
+    case 6: // @mode Color Sinusoid @uses ffHue,ffSat,ffBright,ffLedStart,ffLedLength,cAmp
       for (int led = 0; led < NUM_LEDS; led += 1) {
         byte cphaseIdx = ((led + ffLedStart) * 64 / ffLedLength) % 64;
         byte h = (256 + ffHue + cAmp * COLOR_PHASE[cphaseIdx] / 100) % 256;
@@ -270,13 +369,13 @@ void OnControlChange(byte channel, byte control, byte value) {
       }
       break;
     //---------------------------------------------------------------
-    case 7:// Flash lights
+    case 7: // @mode Flash Lights @uses ffHue,ffSat,ffBright
       updateBG();
       //leds[RANDOM_LEDS[ffLedStart]] = CHSV(ffHue, ffSat, ffBright);
       leds[random(NUM_LEDS)] = CHSV(ffHue, ffSat, ffBright);
       break;
     //---------------------------------------------------------------
-    case 8:// Ocean Waves
+    case 8: // @mode Ocean Waves @uses ffHue,ffSat,ffBright,ffLedLength,pan
       updateBG();
 
       tMiddle = (NUM_LEDS / 2 - 1) * pan / 127 + NUM_LEDS / 4; // if Pan is 1, tmWave is 0, the right side of
@@ -298,7 +397,7 @@ void OnControlChange(byte channel, byte control, byte value) {
       }
       break;
     //---------------------------------------------------------------
-    case 9:// Opposing Waves
+    case 9: // @mode Opposing Waves @uses ffHue,ffSat,ffBright,ffLedLength,pan
       updateBG();
 
       tMiddle = (NUM_LEDS / 2 - 1) * pan / 127 + NUM_LEDS / 4; // if Pan is 1, tmWave is 0, the right side of
@@ -327,17 +426,17 @@ void OnControlChange(byte channel, byte control, byte value) {
 void updateBG() {
 
   switch (bgMode) {
-    case 0:// Plain BG color
+    case 0: // @mode Flat Color background @uses bgHue,bgSat,bgBright
       for (int led = 0; led < NUM_LEDS; led += 1) {
         leds[led] = CHSV(bgHue, bgSat, bgBright);
       }
       break;
-    case 1:// Rainbow Circle
+    case 1: // @mode rainbow wheel background @uses bgHue,bgSat,bgBright
       for (int led = 0; led < NUM_LEDS; led += 1) {
         leds[led] = CHSV((bgHue + led * RAINBOW_INC), bgSat, bgBright);
       }
       break;
-    case 2:// Color Sinusoid
+    case 2: // @mode Color Sinusoid @uses bgHue,bgSat,bgBright,bgLedStart,bgLedLength,cAmp
       for (int led = 0; led < NUM_LEDS; led += 1) {
         byte cphaseIdx = ((led + bgLedStart) * 64 / bgLedLength) % 64;
         byte h = (256 + bgHue + cAmp * COLOR_PHASE[cphaseIdx] / 100) % 256;

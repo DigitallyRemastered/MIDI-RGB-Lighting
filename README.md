@@ -91,3 +91,71 @@ These variables generally control these aspects of the LEDs:
 
 4. You can right click a control knob and select *create automation clip* to be able to automate that property temporally.
 
+## Extending the Light System
+
+The code uses structured comments to define MIDI parameters and modes. The `generate_csv.py` script automatically parses these comments to create `Template.csv` for FL Studio.
+
+### Adding a New Parameter
+
+1. Add a metadata block in `lights.ino` before the variable declaration:
+```cpp
+/**
+ * @param MyParameter
+ * @cc 16
+ * @layer Foreground
+ * @tooltip Description of what this parameter does
+ */
+int myVar = 0;
+```
+
+2. Add a case to the `OnControlChange` switch statement:
+```cpp
+case 16: myVar = value; break;
+```
+
+3. Use the variable in one or more mode implementations
+
+4. Regenerate the CSV: `python generate_csv.py`
+
+### Adding a New Mode
+
+1. Add the mode name to the appropriate mode selector's `@modes` list:
+```cpp
+/**
+ * @param Foreground
+ * @cc 6
+ * @modes 0:Notes to Drives,...,10:MyNewMode
+ */
+```
+
+2. Implement the mode logic in the appropriate switch statement with a mode annotation:
+```cpp
+case 10: // @mode MyNewMode @uses ffHue,ffSat,ffBright,myVar
+  // Your mode logic here
+  break;
+```
+
+3. Regenerate the CSV: `python generate_csv.py`
+
+### Structured Comment Tags
+
+- `@param DisplayName` - Name shown in FL Studio
+- `@cc N` - MIDI Control Change number (1-15, or higher if MIDI allows)
+- `@layer Foreground|Background|Shared` - Which layer uses this parameter (omit for mode selectors)
+- `@tooltip Description` - Help text for the parameter
+- `@modes N:ModeName,M:OtherMode` - For mode selectors only, lists available modes
+- `@mode ModeName @uses var1,var2` - Annotates a case statement with mode info
+
+### Validation
+
+Run validation to check for errors before regenerating:
+```bash
+python generate_csv.py --validate
+```
+
+This will:
+- Check all CCs 1-15 have definitions
+- Verify no duplicate CC numbers
+- Ensure all modes in `@modes` are implemented
+- Compare generated CSV with existing to detect changes
+
