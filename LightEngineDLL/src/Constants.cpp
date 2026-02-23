@@ -5,7 +5,7 @@
   Extracted from lights.ino.
 */
 
-#include "../Shared/LightEngineAPI.h"
+#include "LightEngineAPI.h"
 
 // ============================================================================
 // Color Lookup Tables

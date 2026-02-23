@@ -5,7 +5,7 @@
   Extracted from lights.ino updateBG function.
 */
 
-#include "../../Shared/LightEngineAPI.h"
+#include "../LightEngineAPI.h"
 
 // Defined in Constants.cpp
 extern "C" {

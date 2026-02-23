@@ -4,7 +4,7 @@
   Main entry points and mode dispatchers.
 */
 
-#include "../Shared/LightEngineAPI.h"
+#include "LightEngineAPI.h"
 #include <string.h>
 #include <stdio.h>
 

@@ -5,7 +5,7 @@
   Extracted from lights.ino case 8.
 */
 
-#include "../../Shared/LightEngineAPI.h"
+#include "../LightEngineAPI.h"
 #include <string.h>
 
 // Defined in Constants.cpp

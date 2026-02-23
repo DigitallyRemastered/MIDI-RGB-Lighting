@@ -5,7 +5,7 @@
   This is the single source of truth for all parameter/mode information.
 */
 
-#include "../Shared/LightEngineAPI.h"
+#include "LightEngineAPI.h"
 #include <string.h>
 
 // ============================================================================

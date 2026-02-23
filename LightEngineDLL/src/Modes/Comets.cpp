@@ -5,7 +5,7 @@
   Extracted from lights.ino case 3.
 */
 
-#include "../../Shared/LightEngineAPI.h"
+#include "../LightEngineAPI.h"
 #include <string.h>
 
 // ===== BEGIN: Comets (sync with lights.ino case 3) =====

@@ -5,7 +5,7 @@
   Extracted from lights.ino case 1.
 */
 
-#include "../../Shared/LightEngineAPI.h"
+#include "../LightEngineAPI.h"
 
 // ===== BEGIN: Rainbow Wheel (sync with lights.ino case 1) =====
 

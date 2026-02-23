@@ -5,7 +5,7 @@
   Extracted from lights.ino case 2.
 */
 
-#include "../../Shared/LightEngineAPI.h"
+#include "../LightEngineAPI.h"
 #include <string.h>
 
 // ===== BEGIN: Moving Dots (sync with lights.ino case 2) =====

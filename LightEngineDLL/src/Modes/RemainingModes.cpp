@@ -4,7 +4,7 @@
   Implementations for Back and Forth, Color Sinusoid, Flash Lights, and Opposing Waves.
 */
 
-#include "../../Shared/LightEngineAPI.h"
+#include "../LightEngineAPI.h"
 #include <string.h>
 #include <stdlib.h>
 

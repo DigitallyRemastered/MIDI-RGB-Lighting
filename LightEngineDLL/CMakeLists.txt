@@ -75,7 +75,7 @@ install(TARGETS LightEngine
     RUNTIME DESTINATION bin
 )
 
-install(FILES ${CMAKE_SOURCE_DIR}/../Shared/LightEngineAPI.h
+install(FILES ${CMAKE_SOURCE_DIR}/src/LightEngineAPI.h
     DESTINATION include
 )
 
