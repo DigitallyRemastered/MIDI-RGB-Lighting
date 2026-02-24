@@ -175,11 +175,6 @@ After successful build:
    - Loads from Resources/ folder relative to plugin binary
    - Falls back to system search paths
 
-3. **Next steps**:
-   - Implement `LightEngineLoader.h` in JUCE plugin (see IMPLEMENTATION.md)
-   - Create `LightPreviewComponent` for UI
-   - Test in FL Studio or standalone plugin host
-
 ---
 
 ## Development Workflow

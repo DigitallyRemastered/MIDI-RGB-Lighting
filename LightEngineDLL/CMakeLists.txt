@@ -18,33 +18,18 @@ else()
     set(LIBRARY_OUTPUT_NAME "LightEngine.so")
 endif()
 
-# Source files
-set(API_SOURCES
-    src/LightEngineAPI.cpp
-    src/Metadata.cpp
-    src/Constants.cpp
-)
-
-set(MODE_SOURCES
-    src/Modes/RainbowWheel.cpp
-    src/Modes/MovingDots.cpp
-    src/Modes/Comets.cpp
-    src/Modes/OceanWaves.cpp
-    src/Modes/Backgrounds.cpp
-    src/Modes/NotesToDrives.cpp
-    src/Modes/RemainingModes.cpp
+# Source files - Unified Engine Architecture
+set(ENGINE_SOURCES
+    src/LightEngine.cpp
 )
 
 # Create shared library
 add_library(LightEngine SHARED
-    ${API_SOURCES}
-    ${MODE_SOURCES}
+    ${ENGINE_SOURCES}
 )
 
 # Include directories
 target_include_directories(LightEngine
-    PUBLIC
-        ${CMAKE_SOURCE_DIR}/../Shared
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src
 )
@@ -75,7 +60,7 @@ install(TARGETS LightEngine
     RUNTIME DESTINATION bin
 )
 
-install(FILES ${CMAKE_SOURCE_DIR}/src/LightEngineAPI.h
+install(FILES ${CMAKE_SOURCE_DIR}/src/LightEngine.h
     DESTINATION include
 )
 
