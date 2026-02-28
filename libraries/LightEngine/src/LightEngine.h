@@ -265,6 +265,11 @@ LIGHT_ENGINE_EXPORT const char* lightEngine_getForegroundModeName(int modeId);
 LIGHT_ENGINE_EXPORT int lightEngine_getBackgroundModeCount();
 LIGHT_ENGINE_EXPORT const char* lightEngine_getBackgroundModeName(int modeId);
 
+LIGHT_ENGINE_EXPORT int lightEngine_getForegroundModeParameterCount(int modeId);
+LIGHT_ENGINE_EXPORT int lightEngine_getForegroundModeParameter(int modeId, int index);
+LIGHT_ENGINE_EXPORT int lightEngine_getBackgroundModeParameterCount(int modeId);
+LIGHT_ENGINE_EXPORT int lightEngine_getBackgroundModeParameter(int modeId, int index);
+
 #ifdef __cplusplus
 }
 #endif

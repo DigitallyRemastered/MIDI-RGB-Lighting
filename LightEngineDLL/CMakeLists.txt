@@ -19,7 +19,7 @@ else()
 endif()
 
 # Reference Arduino LightEngine source files (single source of truth)
-set(ARDUINO_LIGHT_ENGINE_DIR ${CMAKE_SOURCE_DIR}/../Source/lights/LightEngine)
+set(ARDUINO_LIGHT_ENGINE_DIR ${CMAKE_SOURCE_DIR}/../libraries/LightEngine/src)
 
 # Source files - Use the SAME files as Arduino
 set(ENGINE_SOURCES

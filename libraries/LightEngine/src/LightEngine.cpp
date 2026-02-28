@@ -119,6 +119,89 @@ const ModeInfo* getBackgroundModeInfo(int modeId) {
     return &BACKGROUND_MODES[modeId];
 }
 
+// Helper: Map parameter variable name to CC number
+static int varNameToCC(const char* varName) {
+    if (!varName || *varName == '\0') return -1;
+    
+    if (strcmp(varName, "ffHue") == 0) return 1;
+    if (strcmp(varName, "ffSat") == 0) return 2;
+    if (strcmp(varName, "ffBright") == 0) return 3;
+    if (strcmp(varName, "ffLedStart") == 0) return 4;
+    if (strcmp(varName, "ffLedLength") == 0) return 5;
+    if (strcmp(varName, "lines") == 0) return 7;
+    if (strcmp(varName, "cAmp") == 0) return 8;
+    if (strcmp(varName, "pan") == 0) return 10;
+    if (strcmp(varName, "bgHue") == 0) return 11;
+    if (strcmp(varName, "bgSat") == 0) return 12;
+    if (strcmp(varName, "bgBright") == 0) return 13;
+    if (strcmp(varName, "bgLedStart") == 0) return 14;
+    if (strcmp(varName, "bgLedLength") == 0) return 15;
+    
+    return -1;
+}
+
+// Convert mode's "uses" field to array of CC numbers
+static int getModeParameterCCs(const char* uses, int* ccArray) {
+    if (!uses || !ccArray) return 0;
+    
+    int count = 0;
+    char buffer[256];
+    strncpy(buffer, uses, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+    
+    char* token = strtok(buffer, ",");
+    while (token && count < 16) {
+        // Trim whitespace
+        while (*token == ' ' || *token == '\t') token++;
+        
+        int cc = varNameToCC(token);
+        if (cc > 0) {
+            ccArray[count++] = cc;
+        }
+        token = strtok(nullptr, ",");
+    }
+    
+    return count;
+}
+
+int getForegroundModeParameterCount(int modeId) {
+    const ModeInfo* info = getForegroundModeInfo(modeId);
+    if (!info) return 0;
+    
+    int ccArray[16];
+    return getModeParameterCCs(info->uses, ccArray);
+}
+
+int getForegroundModeParameter(int modeId, int index) {
+    const ModeInfo* info = getForegroundModeInfo(modeId);
+    if (!info) return -1;
+    
+    int ccArray[16];
+    int count = getModeParameterCCs(info->uses, ccArray);
+    
+    if (index < 0 || index >= count) return -1;
+    return ccArray[index];
+}
+
+int getBackgroundModeParameterCount(int modeId) {
+    const ModeInfo* info = getBackgroundModeInfo(modeId);
+    if (!info) return 0;
+    
+    int ccArray[16];
+    return getModeParameterCCs(info->uses, ccArray);
+}
+
+int getBackgroundModeParameter(int modeId, int index) {
+    const ModeInfo* info = getBackgroundModeInfo(modeId);
+    if (!info) return -1;
+    
+    int ccArray[16];
+    int count = getModeParameterCCs(info->uses, ccArray);
+    
+    if (index < 0 || index >= count) return -1;
+    return ccArray[index];
+}
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -630,6 +713,22 @@ int lightEngine_getBackgroundModeCount() {
 const char* lightEngine_getBackgroundModeName(int modeId) {
     const ModeInfo* info = getBackgroundModeInfo(modeId);
     return info ? info->name : "";
+}
+
+int lightEngine_getForegroundModeParameterCount(int modeId) {
+    return getForegroundModeParameterCount(modeId);
+}
+
+int lightEngine_getForegroundModeParameter(int modeId, int index) {
+    return getForegroundModeParameter(modeId, index);
+}
+
+int lightEngine_getBackgroundModeParameterCount(int modeId) {
+    return getBackgroundModeParameterCount(modeId);
+}
+
+int lightEngine_getBackgroundModeParameter(int modeId, int index) {
+    return getBackgroundModeParameter(modeId, index);
 }
 
 } // extern "C"
