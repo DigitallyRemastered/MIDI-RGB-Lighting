@@ -18,9 +18,12 @@ else()
     set(LIBRARY_OUTPUT_NAME "LightEngine.so")
 endif()
 
-# Source files - Unified Engine Architecture
+# Reference Arduino LightEngine source files (single source of truth)
+set(ARDUINO_LIGHT_ENGINE_DIR ${CMAKE_SOURCE_DIR}/../Source/lights/LightEngine)
+
+# Source files - Use the SAME files as Arduino
 set(ENGINE_SOURCES
-    src/LightEngine.cpp
+    ${ARDUINO_LIGHT_ENGINE_DIR}/LightEngine.cpp
 )
 
 # Create shared library
@@ -28,10 +31,10 @@ add_library(LightEngine SHARED
     ${ENGINE_SOURCES}
 )
 
-# Include directories
+# Include directories - point to Arduino folder
 target_include_directories(LightEngine
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+        ${ARDUINO_LIGHT_ENGINE_DIR}
 )
 
 # Platform-specific compile options
@@ -60,12 +63,13 @@ install(TARGETS LightEngine
     RUNTIME DESTINATION bin
 )
 
-install(FILES ${CMAKE_SOURCE_DIR}/src/LightEngine.h
+install(FILES ${ARDUINO_LIGHT_ENGINE_DIR}/LightEngine.h
     DESTINATION include
 )
 
 # Print configuration info
 message(STATUS "Light Engine DLL Configuration:")
+message(STATUS "  Source Directory: ${ARDUINO_LIGHT_ENGINE_DIR}")
 message(STATUS "  Output Directory: ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")

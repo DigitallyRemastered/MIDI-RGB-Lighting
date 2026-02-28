@@ -1,13 +1,12 @@
-/* lights - Arduino Firmware for RGB Lighting
+/* lights - Arduino Firmware for RGB Lighting (Teensy USB-MIDI Version)
  * 
  * Thin wrapper around the LightEngine class.
  * All rendering logic, constants, and state are handled by the engine.
  * This file simply forwards MIDI events and calls render() at 30Hz.
  */
 
-#define ARDUINO
 #include <FastLED.h>
-#include "../../LightEngineDLL/src/LightEngine.h"
+#include <LightEngine.h>  // Library include
 
 #define NUM_LEDS 108
 #define DATA_PIN 0
