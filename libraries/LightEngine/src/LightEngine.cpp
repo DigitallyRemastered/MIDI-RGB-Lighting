@@ -243,6 +243,22 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     lineOffset = 0;
     frameCounter = 0;
     
+    // Initialize tempo-sync state
+    tempoBPM = 120.0f;          // Default 120 BPM
+    beatsPerLoop = 4;           // Default 4-beat loop
+    recalculateFramesPerLoop(); // Sets framesPerLoop = (4 * 60 * 30) / 120 = 60
+    
+    // Initialize all waveforms to disabled
+    for (int i = 0; i < 15; ++i) {
+        waveforms[i].profile = WAVEFORM_SAWTOOTH;
+        waveforms[i].amplitude = 0;
+        waveforms[i].offset = 64;
+        waveforms[i].phaseShift = 0;
+        waveforms[i].period = 4;   // Default 4-beat period
+        waveforms[i].direction = true;
+        waveforms[i].enable = false;  // Disabled by default
+    }
+    
     // Initialize LEDs to checkerboard pattern
     for (int i = 0; i < numLeds; i++) {
         if (i % 2 == 0) {
@@ -354,8 +370,16 @@ void LightEngine::setCC(int ccNumber, int value) {
 // ============================================================================
 
 void LightEngine::render() {
-    // Increment frame counter for randomness
+    // Check for loop wrap (tempo-synced)
+    if (frameCounter >= framesPerLoop) {
+        frameCounter = 0;
+    }
+    
+    // Increment frame counter
     frameCounter++;
+    
+    // Apply waveform modulation to parameters (if enabled)
+    applyWaveformModulation();
     
     // Step 1: Render background
     updateBackground();
@@ -623,6 +647,182 @@ void LightEngine::renderOpposingWaves() {
 }
 
 // ============================================================================
+// Waveform Modulation Implementation
+// ============================================================================
+
+float LightEngine::evaluateWaveform(int profile, float phase, bool direction) const {
+    // phase is 0.0-1.0 representing position in cycle
+    // Returns 0.0-1.0 waveform value
+    
+    // Flip phase if direction is reversed
+    if (!direction) {
+        phase = 1.0f - phase;
+    }
+    
+    switch (profile) {
+        case WAVEFORM_SAWTOOTH:
+            // Linear ramp 0→1
+            return phase;
+        
+        case WAVEFORM_TRIANGLE:
+            // Triangle wave: ramps 0→1→0
+            if (phase < 0.5f) {
+                return 2.0f * phase;  // Rising edge
+            } else {
+                return 2.0f * (1.0f - phase);  // Falling edge
+            }
+        
+        case WAVEFORM_SQUARE:
+            // Square wave: 0 for first half, 1 for second half
+            return (phase < 0.5f) ? 0.0f : 1.0f;
+        
+        case WAVEFORM_SINE:
+            // Use COLOR_PHASE lookup table (sine wave approximation)
+            // COLOR_PHASE is a 64-entry table representing one sine cycle
+            {
+                int idx = (int)(phase * 64.0f) % 64;
+                // COLOR_PHASE ranges from -100 to +100, normalize to 0.0-1.0
+                float sineValue = (COLOR_PHASE[idx] + 100.0f) / 200.0f;
+                return sineValue;
+            }
+        
+        default:
+            return phase;  // Fallback to sawtooth
+    }
+}
+
+void LightEngine::applyWaveformModulation() {
+    // For each CC parameter (1-15), check if waveform is enabled
+    for (int cc = 1; cc <= 15; ++cc) {
+        const WaveformConfig& wf = waveforms[cc - 1];  // CC1 is index 0
+        
+        if (!wf.enable)
+            continue;  // Skip disabled waveforms
+        
+        // Calculate frames per period for this waveform
+        // period is in beats, convert to frames: (beats / BPM) * 60 * fps
+        float framesPerPeriod = (wf.period * 60.0f * FRAME_RATE) / tempoBPM;
+        
+        if (framesPerPeriod < 1.0f)
+            framesPerPeriod = 1.0f;  // Avoid divide by zero
+        
+        // Calculate phase (0.0-1.0) including phase shift
+        uint32_t shiftedFrame = (frameCounter + wf.phaseShift) % (uint32_t)framesPerPeriod;
+        float phase = shiftedFrame / framesPerPeriod;
+        
+        // Evaluate waveform
+        float waveValue = evaluateWaveform(wf.profile, phase, wf.direction);
+        
+        // Calculate modulated value: offset + (waveValue * amplitude)
+        // waveValue is 0.0-1.0, amplitude is 0-127
+        int modulatedValue = wf.offset + (int)(waveValue * wf.amplitude);
+        
+        // Clamp to 0-127 MIDI range
+        if (modulatedValue < 0) modulatedValue = 0;
+        if (modulatedValue > 127) modulatedValue = 127;
+        
+        // Apply to the appropriate parameter
+        // Note: CC1-3, 11-13 are scaled 0-254, others are 0-127
+        switch (cc) {
+            case 1: ffHue = modulatedValue * 2; break;        // Scale to 0-254
+            case 2: ffSat = modulatedValue * 2; break;
+            case 3: ffBright = modulatedValue * 2; break;
+            case 4: ffLedStart = modulatedValue; break;       // Keep 0-127
+            case 5: ffLedLength = modulatedValue; break;
+            case 6: ffMode = modulatedValue; break;
+            case 7: lines = modulatedValue; break;
+            case 8: cAmp = modulatedValue; break;
+            case 9: bgMode = modulatedValue; break;
+            case 10: pan = modulatedValue; break;
+            case 11: bgHue = modulatedValue * 2; break;
+            case 12: bgSat = modulatedValue * 2; break;
+            case 13: bgBright = modulatedValue * 2; break;
+            case 14: bgLedStart = modulatedValue; break;
+            case 15: bgLedLength = modulatedValue; break;
+        }
+    }
+}
+
+void LightEngine::recalculateFramesPerLoop() {
+    // Calculate frames per loop: (beats / BPM) * 60 seconds * fps
+    // Example: (4 beats / 120 BPM) * 60 * 30 = 60 frames = 2 seconds
+    if (tempoBPM > 0.0f) {
+        framesPerLoop = (uint32_t)((beatsPerLoop * 60.0f * FRAME_RATE) / tempoBPM);
+        if (framesPerLoop < 1)
+            framesPerLoop = 1;  // Minimum 1 frame
+    } else {
+        framesPerLoop = 60;  // Fallback to 2 seconds
+    }
+}
+
+// ============================================================================
+// SysEx Handler
+// ============================================================================
+
+void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
+    // Validate minimum message length and manufacturer ID
+    // Format: [F0, 7D, msgType, ...data..., F7]
+    if (length < 4)  // Minimum: F0, 7D, type, F7
+        return;
+    
+    if (data[0] != 0xF0 || data[1] != 0x7D)  // Check for SysEx start and manufacturer ID
+        return;
+    
+    if (data[length - 1] != 0xF7)  // Check for SysEx end
+        return;
+    
+    uint8_t msgType = data[2];
+    
+    switch (msgType) {
+        case 0x01:  // Tempo update
+            // Format: [F0, 7D, 01, bpm_msb, bpm_lsb, F7]
+            if (length >= 6) {
+                uint16_t bpmScaled = (data[3] << 7) | data[4];  // 14-bit BPM * 10
+                tempoBPM = bpmScaled / 10.0f;
+                recalculateFramesPerLoop();
+            }
+            break;
+        
+        case 0x02:  // Waveform parameter config
+            // Format: [F0, 7D, 02, ccNumber, paramEnum, value, F7]
+            if (length >= 7) {
+                uint8_t ccNumber = data[3];   // 1-15
+                uint8_t paramEnum = data[4];  // 0-7
+                uint8_t value = data[5];      // 0-127
+                
+                if (ccNumber >= 1 && ccNumber <= 15) {
+                    WaveformConfig& wf = waveforms[ccNumber - 1];
+                    
+                    switch (paramEnum) {
+                        case 0: wf.profile = value & 0x03; break;  // 0-3
+                        case 1: wf.amplitude = value; break;       // 0-127
+                        case 2: wf.offset = value; break;          // 0-127
+                        case 3: // phaseShift low 7 bits
+                            wf.phaseShift = (wf.phaseShift & 0x3F80) | value;
+                            break;
+                        case 4: wf.period = (value > 0) ? value : 1; break;  // 1-127 beats
+                        case 5: wf.direction = (value > 0); break;           // 0=reverse, 1=forward
+                        case 6: wf.enable = (value > 0); break;              // 0=disabled, 1=enabled
+                        case 7: // phaseShift high 7 bits
+                            wf.phaseShift = (value << 7) | (wf.phaseShift & 0x7F);
+                            break;
+                    }
+                }
+            }
+            break;
+        
+        case 0x03:  // Playback start (reset frameCounter)
+            // Format: [F0, 7D, 03, F7]
+            frameCounter = 0;
+            break;
+        
+        default:
+            // Unknown message type, ignore
+            break;
+    }
+}
+
+// ============================================================================
 // C API Implementation (Windows DLL)
 // ============================================================================
 
@@ -648,6 +848,10 @@ void lightEngine_handleNoteOn(void* engine, uint8_t channel, uint8_t note, uint8
 
 void lightEngine_handleNoteOff(void* engine, uint8_t channel, uint8_t note, uint8_t velocity) {
     static_cast<LightEngine*>(engine)->handleNoteOff(channel, note, velocity);
+}
+
+void lightEngine_handleSysEx(void* engine, const uint8_t* data, uint16_t length) {
+    static_cast<LightEngine*>(engine)->handleSysEx(data, length);
 }
 
 void lightEngine_render(void* engine) {

@@ -31,6 +31,29 @@
 #endif
 
 // ============================================================================
+// Waveform Modulation
+// ============================================================================
+
+// Waveform profile types
+enum WaveformProfile {
+    WAVEFORM_SAWTOOTH = 0,
+    WAVEFORM_TRIANGLE = 1,
+    WAVEFORM_SQUARE = 2,
+    WAVEFORM_SINE = 3
+};
+
+// Waveform configuration for a single parameter
+struct WaveformConfig {
+    uint8_t profile;        // WaveformProfile (0-3)
+    uint8_t amplitude;      // 0-127: magnitude of change through cycle
+    uint8_t offset;         // 0-127: static base value
+    uint16_t phaseShift;    // 0-16383: frame offset for phase alignment
+    uint8_t period;         // 1-127: number of beats per cycle
+    bool direction;         // true = forward, false = reverse
+    bool enable;            // true = use waveform, false = use CC value only
+};
+
+// ============================================================================
 // Light Engine Class
 // ============================================================================
 
@@ -70,6 +93,14 @@ public:
      * @param velocity Release velocity (0-127)
      */
     void handleNoteOff(uint8_t channel, uint8_t note, uint8_t velocity);
+    
+    /**
+     * Handle MIDI System Exclusive message
+     * Used for tempo sync and waveform configuration
+     * @param data SysEx message bytes (including F0/F7)
+     * @param length Total message length
+     */
+    void handleSysEx(const uint8_t* data, uint16_t length);
     
     // ========================================================================
     // Rendering
@@ -151,6 +182,17 @@ private:
     uint32_t frameCounter;     // Auto-incremented for random seed
     
     // ========================================================================
+    // Tempo-Sync Waveform Modulation State
+    // ========================================================================
+    static const uint8_t FRAME_RATE = 30;  // Fixed 30fps rendering
+    
+    float tempoBPM;                // Current DAW tempo (60.0-240.0 typical)
+    uint8_t beatsPerLoop;          // Beats before frameCounter resets (default 4)
+    uint32_t framesPerLoop;        // Calculated: (beatsPerLoop / tempoBPM) * 60 * FRAME_RATE
+    
+    WaveformConfig waveforms[15];  // One config per CC parameter (CC1-15)
+    
+    // ========================================================================
     // Constants (defined in LightEngine.cpp)
     // ========================================================================
     static const int COLOR_PHASE[64];
@@ -183,6 +225,11 @@ private:
     // Utility
     inline void setLED(int index, uint8_t h, uint8_t s, uint8_t v);
     inline void copyBackground();
+    
+    // Waveform modulation helpers
+    float evaluateWaveform(int profile, float phase, bool direction) const;
+    void applyWaveformModulation();
+    void recalculateFramesPerLoop();
 };
 
 // ============================================================================
@@ -240,6 +287,7 @@ LIGHT_ENGINE_EXPORT void lightEngine_destroy(void* engine);
 LIGHT_ENGINE_EXPORT void lightEngine_handleControlChange(void* engine, uint8_t channel, uint8_t control, uint8_t value);
 LIGHT_ENGINE_EXPORT void lightEngine_handleNoteOn(void* engine, uint8_t channel, uint8_t note, uint8_t velocity);
 LIGHT_ENGINE_EXPORT void lightEngine_handleNoteOff(void* engine, uint8_t channel, uint8_t note, uint8_t velocity);
+LIGHT_ENGINE_EXPORT void lightEngine_handleSysEx(void* engine, const uint8_t* data, uint16_t length);
 
 // Rendering
 LIGHT_ENGINE_EXPORT void lightEngine_render(void* engine);

@@ -80,6 +80,7 @@ void setup() {
   MIDI.setHandleNoteOn(OnNoteOn);
   MIDI.setHandleNoteOff(OnNoteOff);
   MIDI.setHandleControlChange(OnControlChange);
+  MIDI.setHandleSysEx(OnSysEx);
   
   Serial.println("Ready!");
   
@@ -116,6 +117,13 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 
 void OnControlChange(byte channel, byte control, byte value) {
   engine.handleControlChange(channel, control, value);
+}
+
+void OnSysEx(const byte* data, uint16_t length, bool complete) {
+  // Only process complete SysEx messages
+  if (complete) {
+    engine.handleSysEx(data, length);
+  }
 }
 
 // ============================================================================
