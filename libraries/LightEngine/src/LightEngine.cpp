@@ -245,8 +245,6 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     
     // Initialize tempo-sync state
     tempoBPM = 120.0f;          // Default 120 BPM
-    beatsPerLoop = 4;           // Default 4-beat loop
-    recalculateFramesPerLoop(); // Sets framesPerLoop = (4 * 60 * 30) / 120 = 60
     
     // Initialize all waveforms to disabled
     for (int i = 0; i < 15; ++i) {
@@ -370,11 +368,6 @@ void LightEngine::setCC(int ccNumber, int value) {
 // ============================================================================
 
 void LightEngine::render() {
-    // Check for loop wrap (tempo-synced)
-    if (frameCounter >= framesPerLoop) {
-        frameCounter = 0;
-    }
-    
     // Increment frame counter
     frameCounter++;
     
@@ -743,18 +736,6 @@ void LightEngine::applyWaveformModulation() {
     }
 }
 
-void LightEngine::recalculateFramesPerLoop() {
-    // Calculate frames per loop: (beats / BPM) * 60 seconds * fps
-    // Example: (4 beats / 120 BPM) * 60 * 30 = 60 frames = 2 seconds
-    if (tempoBPM > 0.0f) {
-        framesPerLoop = (uint32_t)((beatsPerLoop * 60.0f * FRAME_RATE) / tempoBPM);
-        if (framesPerLoop < 1)
-            framesPerLoop = 1;  // Minimum 1 frame
-    } else {
-        framesPerLoop = 60;  // Fallback to 2 seconds
-    }
-}
-
 // ============================================================================
 // SysEx Handler
 // ============================================================================
@@ -779,7 +760,6 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             if (length >= 6) {
                 uint16_t bpmScaled = (data[3] << 7) | data[4];  // 14-bit BPM * 10
                 tempoBPM = bpmScaled / 10.0f;
-                recalculateFramesPerLoop();
             }
             break;
         

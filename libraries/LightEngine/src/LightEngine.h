@@ -187,8 +187,6 @@ private:
     static const uint8_t FRAME_RATE = 30;  // Fixed 30fps rendering
     
     float tempoBPM;                // Current DAW tempo (60.0-240.0 typical)
-    uint8_t beatsPerLoop;          // Beats before frameCounter resets (default 4)
-    uint32_t framesPerLoop;        // Calculated: (beatsPerLoop / tempoBPM) * 60 * FRAME_RATE
     
     WaveformConfig waveforms[15];  // One config per CC parameter (CC1-15)
     
@@ -229,7 +227,6 @@ private:
     // Waveform modulation helpers
     float evaluateWaveform(int profile, float phase, bool direction) const;
     void applyWaveformModulation();
-    void recalculateFramesPerLoop();
 };
 
 // ============================================================================
