@@ -9,6 +9,9 @@
 #ifndef ARDUINO
     #include <cstdlib>
     #include <cstring>
+    #include <cmath>
+#else
+    #include <math.h>
 #endif
 
 // ============================================================================
@@ -700,7 +703,7 @@ void LightEngine::applyWaveformModulation() {
             framesPerPeriod = 1.0f;  // Avoid divide by zero
         
         // Calculate phase (0.0-1.0) including phase shift
-        uint32_t shiftedFrame = (frameCounter + wf.phaseShift) % (uint32_t)framesPerPeriod;
+        float shiftedFrame = fmod((float)frameCounter + (float)wf.phaseShift, framesPerPeriod);
         float phase = shiftedFrame / framesPerPeriod;
         
         // Evaluate waveform
