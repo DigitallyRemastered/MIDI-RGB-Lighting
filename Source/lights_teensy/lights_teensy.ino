@@ -70,6 +70,16 @@ void OnControlChange(byte channel, byte control, byte value) {
 void OnSysEx(const byte* data, uint16_t length, bool complete) {
   // Only process complete SysEx messages
   if (complete) {
+        // Debug output - show first few bytes of received SysEx
+    // Serial.print("SysEx received (");
+    // Serial.print(length);
+    // Serial.print(" bytes): ");
+    // for (int i = 0; i < min(8, length); i++) {
+    //   Serial.print(data[i], HEX);
+    //   Serial.print(" ");
+    // }
+    // Serial.println();
+    
     engine.handleSysEx(data, length);
   }
 }

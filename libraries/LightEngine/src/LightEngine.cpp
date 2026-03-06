@@ -745,33 +745,44 @@ void LightEngine::applyWaveformModulation() {
 
 void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
     // Validate minimum message length and manufacturer ID
-    // Format: [F0, 7D, msgType, ...data..., F7]
+    // Format: [F0, 7D, msgType, ...data..., F7] (standard MIDI)
+    //     or: [F0, cable/channel, 7D, msgType, ...data..., F7] (USB MIDI with extra byte)
     if (length < 4)  // Minimum: F0, 7D, type, F7
         return;
     
-    if (data[0] != 0xF0 || data[1] != 0x7D)  // Check for SysEx start and manufacturer ID
+    if (data[0] != 0xF0)  // Check for SysEx start
         return;
     
     if (data[length - 1] != 0xF7)  // Check for SysEx end
         return;
     
-    uint8_t msgType = data[2];
+    // Detect format: check if byte 1 or byte 2 contains our manufacturer ID (0x7D)
+    int offset = 0;  // Byte offset to manufacturer ID
+    if (data[1] == 0x7D) {
+        offset = 1;  // Standard MIDI format
+    } else if (length >= 5 && data[2] == 0x7D) {
+        offset = 2;  // USB MIDI format with extra byte
+    } else {
+        return;  // Unknown format - not our message
+    }
+    
+    uint8_t msgType = data[offset + 1];
     
     switch (msgType) {
         case 0x01:  // Tempo update
             // Format: [F0, 7D, 01, bpm_msb, bpm_lsb, F7]
-            if (length >= 6) {
-                uint16_t bpmScaled = (data[3] << 7) | data[4];  // 14-bit BPM * 10
+            if (length >= offset + 4) {  // Need manufacturer ID, msgType, and 2 data bytes
+                uint16_t bpmScaled = (data[offset + 2] << 7) | data[offset + 3];  // 14-bit BPM * 10
                 tempoBPM = bpmScaled / 10.0f;
             }
             break;
         
         case 0x02:  // Waveform parameter config
             // Format: [F0, 7D, 02, ccNumber, paramEnum, value, F7]
-            if (length >= 7) {
-                uint8_t ccNumber = data[3];   // 1-15
-                uint8_t paramEnum = data[4];  // 0-7
-                uint8_t value = data[5];      // 0-127
+            if (length >= offset + 5) {  // Need manufacturer ID, msgType, and 3 data bytes
+                uint8_t ccNumber = data[offset + 2];   // 1-15
+                uint8_t paramEnum = data[offset + 3];  // 0-7
+                uint8_t value = data[offset + 4];      // 0-127
                 
                 if (ccNumber >= 1 && ccNumber <= 15) {
                     WaveformConfig& wf = waveforms[ccNumber - 1];
