@@ -173,7 +173,6 @@ private:
     // Note State
     // ========================================================================
     uint8_t activeNotes[128];  // activeNotes[note] = velocity (0 = off)
-    uint8_t currentNote[17];   // Per-channel note tracking (for Notes to Drives)
     
     // ========================================================================
     // Helper Variables
@@ -194,8 +193,6 @@ private:
     // Constants (defined in LightEngine.cpp)
     // ========================================================================
     static const int COLOR_PHASE[64];
-    static const uint8_t TOP_BOTTOM_MIRROR_MAP[48];
-    static const uint8_t CHANNEL_TO_LED[17][6];
     
     // ========================================================================
     // Internal Rendering Methods
@@ -204,7 +201,6 @@ private:
     void renderForeground();
     
     // Mode-specific rendering
-    void renderNotesToDrives();
     void renderRainbowWheel();
     void renderMovingDots();
     void renderComets();
@@ -212,8 +208,6 @@ private:
     void renderMoveStartLED();
     void renderColorSinusoid();
     void renderFlashLights();
-    void renderOceanWaves();
-    void renderOpposingWaves();
     
     // Background modes
     void renderFlatBackground();

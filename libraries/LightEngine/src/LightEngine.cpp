@@ -26,33 +26,6 @@ const int LightEngine::COLOR_PHASE[64] = {
     -100, -98, -96, -92, -88, -83, -77, -71, -63, -56, -47, -38, -29, -20, -10, 0
 };
 
-// Mirror map for ocean waves (top and bottom LED strips)
-const uint8_t LightEngine::TOP_BOTTOM_MIRROR_MAP[48] = {
-    23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
-    95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 77, 76, 75, 74, 73, 72
-};
-
-// MIDI channel to LED mapping for Notes to Drives mode (108 LED floppy drive layout)
-const uint8_t LightEngine::CHANNEL_TO_LED[17][6] = {
-    {0, 0, 0, 0, 0, 0},           // Channel 0 (unused)
-    {19, 20, 21, 22, 23, 24},     // Channel 1
-    {29, 30, 31, 32, 33, 34},     // Channel 2
-    {13, 14, 15, 16, 17, 18},     // Channel 3
-    {35, 36, 37, 38, 39, 40},     // Channel 4
-    {7, 8, 9, 10, 11, 12},        // Channel 5
-    {41, 42, 43, 44, 45, 46},     // Channel 6
-    {1, 2, 3, 4, 5, 6},           // Channel 7
-    {47, 48, 49, 50, 51, 52},     // Channel 8
-    {73, 74, 75, 76, 77, 78},     // Channel 9
-    {83, 84, 85, 86, 87, 88},     // Channel 10
-    {67, 68, 69, 70, 71, 72},     // Channel 11
-    {89, 90, 91, 92, 93, 94},     // Channel 12
-    {61, 62, 63, 64, 65, 66},     // Channel 13
-    {95, 96, 97, 98, 99, 100},    // Channel 14
-    {55, 56, 57, 58, 59, 60},     // Channel 15
-    {101, 102, 103, 104, 105, 106} // Channel 16
-};
-
 // ============================================================================
 // Parameter Metadata
 // ============================================================================
@@ -76,16 +49,13 @@ static const ParameterInfo PARAMETER_TABLE[] = {
 };
 
 static const ModeInfo FOREGROUND_MODES[] = {
-    {0, "Notes to Drives", "ffHue,ffSat,ffBright"},
-    {1, "Rainbow Wheel", "ffHue,ffSat,ffBright"},
-    {2, "Moving Dots", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines"},
-    {3, "Comets", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines"},
-    {4, "Back and Forth", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength"},
-    {5, "Move startLED with each note on event", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines"},
-    {6, "Color Sinusoid", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,cAmp"},
-    {7, "Flash Lights", "ffHue,ffSat,ffBright"},
-    {8, "Ocean Waves", "ffHue,ffSat,ffBright,ffLedLength,pan"},
-    {9, "Opposing Waves", "ffHue,ffSat,ffBright,ffLedLength,pan"}
+    {0, "Rainbow Wheel", "ffHue,ffSat,ffBright"},
+    {1, "Moving Dots", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines"},
+    {2, "Comets", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines"},
+    {3, "Back and Forth", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength"},
+    {4, "Move startLED with each note on event", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,lines"},
+    {5, "Color Sinusoid", "ffHue,ffSat,ffBright,ffLedStart,ffLedLength,cAmp"},
+    {6, "Flash Lights", "ffHue,ffSat,ffBright"}
 };
 
 static const ModeInfo BACKGROUND_MODES[] = {
@@ -105,11 +75,11 @@ int getAllParameters(const ParameterInfo** outArray) {
 }
 
 int getForegroundModeCount() {
-    return 10;
+    return 7;
 }
 
 const ModeInfo* getForegroundModeInfo(int modeId) {
-    if (modeId < 0 || modeId >= 10) return nullptr;
+    if (modeId < 0 || modeId >= 7) return nullptr;
     return &FOREGROUND_MODES[modeId];
 }
 
@@ -240,7 +210,6 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     
     // Initialize note state
     memset(activeNotes, 0, sizeof(activeNotes));
-    memset(currentNote, 0, sizeof(currentNote));
     
     // Initialize helpers
     lineOffset = 0;
@@ -260,18 +229,8 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
         waveforms[i].enable = false;  // Disabled by default
     }
     
-    // Initialize LEDs to checkerboard pattern
-    for (int i = 0; i < numLeds; i++) {
-        if (i % 2 == 0) {
-            leds[i].h = 80;
-            leds[i].s = 200;
-            leds[i].v = ffBright;
-        } else {
-            leds[i].h = 100;
-            leds[i].s = 200;
-            leds[i].v = ffBright;
-        }
-    }
+    // Initialize LEDs to black (off)
+    memset(leds, 0, numLeds * sizeof(HSVColor));
     memset(background, 0, numLeds * sizeof(HSVColor));
 }
 
@@ -311,13 +270,8 @@ void LightEngine::handleNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) 
         activeNotes[note] = velocity;
     }
     
-    // Per-channel tracking for Notes to Drives mode
-    if (channel >= 1 && channel <= 16) {
-        currentNote[channel] = note;
-    }
-    
     // Mode-specific state changes
-    if (ffMode == 5) {  // Move StartLED mode
+    if (ffMode == 4) {  // Move StartLED mode
         ffLedStart += 1;
         if (ffLedStart >= 127) ffLedStart = 0;
     }
@@ -327,13 +281,6 @@ void LightEngine::handleNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
     // Clear note state
     if (note < 128) {
         activeNotes[note] = 0;
-    }
-    
-    // Clear per-channel tracking
-    if (channel >= 1 && channel <= 16) {
-        if (currentNote[channel] == note) {
-            currentNote[channel] = 0;
-        }
     }
 }
 
@@ -398,16 +345,14 @@ void LightEngine::updateBackground() {
 
 void LightEngine::renderForeground() {
     switch (ffMode) {
-        case 0: renderNotesToDrives(); break;
-        case 1: renderRainbowWheel(); break;
-        case 2: renderMovingDots(); break;
-        case 3: renderComets(); break;
-        case 4: renderBackAndForth(); break;
-        case 5: renderMoveStartLED(); break;
-        case 6: renderColorSinusoid(); break;
-        case 7: renderFlashLights(); break;
-        case 8: renderOceanWaves(); break;
-        case 9: renderOpposingWaves(); break;
+        case 0: renderRainbowWheel(); break;
+        case 1: renderMovingDots(); break;
+        case 2: renderComets(); break;
+        case 3: renderBackAndForth(); break;
+        case 4: renderMoveStartLED(); break;
+        case 5: renderColorSinusoid(); break;
+        case 6: renderFlashLights(); break;
+        default: renderRainbowWheel(); break;
     }
 }
 
@@ -466,29 +411,6 @@ void LightEngine::renderSinusoidBackground() {
 // ============================================================================
 // Foreground Modes
 // ============================================================================
-
-void LightEngine::renderNotesToDrives() {
-    // Check all active notes and light up corresponding drives
-    for (int ch = 1; ch <= 16; ch++) {
-        if (currentNote[ch] != 0) {
-            // Note is active on this channel - light it up
-            for (int i = 0; i < 6; i++) {
-                int ledIdx = CHANNEL_TO_LED[ch][i];
-                setLED(ledIdx, ffHue, ffSat, ffBright);
-            }
-        } else {
-            // Note off - show checkerboard pattern
-            for (int i = 0; i < 6; i++) {
-                int ledIdx = CHANNEL_TO_LED[ch][i];
-                if (i % 2 == 0) {
-                    setLED(ledIdx, 80, 200, ffBright);
-                } else {
-                    setLED(ledIdx, 100, 200, ffBright);
-                }
-            }
-        }
-    }
-}
 
 void LightEngine::renderRainbowWheel() {
     int rainbowInc = 255 / numLeds;
@@ -573,73 +495,6 @@ void LightEngine::renderFlashLights() {
     #endif
     
     setLED(randomLed, ffHue, ffSat, ffBright);
-}
-
-void LightEngine::renderOceanWaves() {
-    int tMiddle = (numLeds / 2 - 1) * pan / 127 + numLeds / 4;
-    int amp = ffLedLength / 2;
-    
-    // Clamp amplitude
-    if (tMiddle - amp <= 24) {
-        amp = tMiddle - 24;
-    } else if (tMiddle + amp > 71) {
-        amp = 71 - tMiddle;
-    }
-    
-    if (amp <= 0) return;
-    
-    // Render wave
-    for (int p = 0; p < amp; p++) {
-        int brightness = ffBright * (amp - p) / amp;
-        
-        setLED(tMiddle + p, ffHue, ffSat, brightness);
-        setLED(tMiddle - p, ffHue, ffSat, brightness);
-        
-        // Mirror to bottom
-        if ((tMiddle + p - 24) >= 0 && (tMiddle + p - 24) < 48) {
-            int mirrorIdx = TOP_BOTTOM_MIRROR_MAP[tMiddle + p - 24];
-            setLED(mirrorIdx, ffHue, ffSat, brightness);
-        }
-        if ((tMiddle - p - 24) >= 0 && (tMiddle - p - 24) < 48) {
-            int mirrorIdx = TOP_BOTTOM_MIRROR_MAP[tMiddle - p - 24];
-            setLED(mirrorIdx, ffHue, ffSat, brightness);
-        }
-    }
-}
-
-void LightEngine::renderOpposingWaves() {
-    int tMiddle = (numLeds / 2 - 1) * pan / 127 + numLeds / 4;
-    int amp = ffLedLength / 2;
-    
-    // Clamp amplitude
-    if (tMiddle - amp <= 24) {
-        amp = tMiddle - 23;
-    } else if (tMiddle + amp > 71) {
-        amp = 71 - tMiddle;
-    }
-    
-    if (amp <= 0) return;
-    
-    // Render opposing waves
-    for (int p = 0; p <= amp; p++) {
-        int brightness = ffBright * (amp - p) / amp;
-        
-        setLED(tMiddle + p, ffHue, ffSat, brightness);
-        setLED(tMiddle - p, ffHue, ffSat, brightness);
-        
-        // Opposing wave
-        int oppositeIdx1 = (numLeds - tMiddle) + p - 24;
-        int oppositeIdx2 = (numLeds - tMiddle) - p - 24;
-        
-        if (oppositeIdx1 >= 0 && oppositeIdx1 < 48) {
-            int mirrorIdx = TOP_BOTTOM_MIRROR_MAP[oppositeIdx1];
-            setLED(mirrorIdx, ffHue, ffSat, brightness);
-        }
-        if (oppositeIdx2 >= 0 && oppositeIdx2 < 48) {
-            int mirrorIdx = TOP_BOTTOM_MIRROR_MAP[oppositeIdx2];
-            setLED(mirrorIdx, ffHue, ffSat, brightness);
-        }
-    }
 }
 
 // ============================================================================
