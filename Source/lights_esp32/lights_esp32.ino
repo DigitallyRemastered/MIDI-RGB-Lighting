@@ -119,11 +119,9 @@ void OnControlChange(byte channel, byte control, byte value) {
   engine.handleControlChange(channel, control, value);
 }
 
-void OnSysEx(const byte* data, uint16_t length, bool complete) {
+void OnSysEx(byte* data, unsigned int length) {
   // Only process complete SysEx messages
-  if (complete) {
     engine.handleSysEx(data, length);
-  }
 }
 
 // ============================================================================
