@@ -56,6 +56,74 @@ ln -s "$(pwd)/libraries/LightEngine" ~/Documents/Arduino/libraries/LightEngine
 - Select **Tools → Board → XIAO_ESP32S3** (or your ESP32 board)
 - Upload
 
+---
+
+## ESP32 Out-of-the-Box Setup (WiFi-MIDI)
+
+Follow these steps to get the ESP32 connected to Light Studio over the network.
+
+### 1. Install ESP32 Board Support
+
+In Arduino IDE:
+1. **File → Preferences** → add this URL to "Additional boards manager URLs":
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+2. **Tools → Board → Boards Manager** → search "esp32" → Install **"esp32 by Espressif Systems"**
+
+### 2. Install Required Libraries
+
+**Tools → Manage Libraries**, install:
+- `FastLED`
+- `AppleMIDI` by lathoub
+- `MIDI Library` by lathoub (dependency of AppleMIDI)
+
+### 3. Configure the Sketch
+
+Open `Source/lights_esp32/lights_esp32.ino` and update lines 17–18 with your WiFi credentials:
+```cpp
+const char* ssid = "YourNetworkName";
+const char* password = "YourPassword";
+```
+
+Also update `NUM_LEDS` (line 20) to match your LED strip length, and `DATA_PIN` (line 21) to the GPIO pin your strip's data line is connected to.
+
+### 4. Upload
+
+1. Plug in the ESP32 via USB
+2. **Tools → Board** → select your ESP32 board (e.g. **XIAO_ESP32S3**, **ESP32 Dev Module**)
+3. **Tools → Port** → select the COM port for the ESP32
+4. Click **Upload**
+
+### 5. Find the ESP32's IP Address
+
+After uploading:
+1. Open **Tools → Serial Monitor** (set baud to **115200**)
+2. Press the reset button on the ESP32
+3. Watch for output like:
+   ```
+   WiFi Connected!
+   IP Address: 192.168.1.XXX
+   ```
+   Note this IP address — you'll need it for rtpMIDI.
+
+### 6. Install rtpMIDI (Windows)
+
+1. Download and install **rtpMIDI** by Tobias Erichsen from:
+   `https://www.tobias-erichsen.de/software/rtpmidi.html`
+2. Open rtpMIDI
+3. Under **"My Sessions"**, click **+** to create a new session (e.g. "Light Studio")
+4. Under **"Directory"**, click **+** to add a remote participant:
+   - **Address:** the ESP32's IP address (from Serial Monitor)
+   - **Port:** `5004`
+5. Click **Connect** — the ESP32 Serial Monitor should print `MIDI Connected to: ...`
+
+### 7. Configure Light Studio
+
+In Light Studio (the JUCE plugin), select the rtpMIDI virtual port (the session name you created in step 6) as the MIDI output device. MIDI notes, CCs, and SysEx will now route from Light Studio → rtpMIDI → ESP32 → LED strip.
+
+---
+
 ## Done!
 
 Both sketches now use `#include <LightEngine.h>` and Arduino IDE will find the library.

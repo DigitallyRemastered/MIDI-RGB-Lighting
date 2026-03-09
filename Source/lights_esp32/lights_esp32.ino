@@ -80,7 +80,7 @@ void setup() {
   MIDI.setHandleNoteOn(OnNoteOn);
   MIDI.setHandleNoteOff(OnNoteOff);
   MIDI.setHandleControlChange(OnControlChange);
-  MIDI.setHandleSysEx(OnSysEx);
+  MIDI.setHandleSystemExclusive(OnSysEx);
   
   Serial.println("Ready!");
   
