@@ -664,7 +664,33 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             // Format: [F0, 7D, 03, F7]
             frameCounter = 0;
             break;
-        
+
+        case 0x05:  // Enable waveform with full config (atomic)
+            // Format: [F0, 7D, 05, cc, profile, amplitude, offset, phaseShiftL, phaseShiftH, period, direction, F7]
+            // Sends all waveform parameters + enable=true in a single message to avoid UDP split.
+            if (length >= offset + 11) {
+                uint8_t ccNum     = data[offset + 2];
+                uint8_t profile   = data[offset + 3];
+                uint8_t amplitude = data[offset + 4];
+                uint8_t wfOffset  = data[offset + 5];
+                uint8_t phaseL    = data[offset + 6];
+                uint8_t phaseH    = data[offset + 7];
+                uint8_t period    = data[offset + 8];
+                uint8_t direction = data[offset + 9];  // 0=reverse, 1=forward
+
+                if (ccNum >= 1 && ccNum <= 15) {
+                    WaveformConfig& wf = waveforms[ccNum - 1];
+                    wf.profile    = profile & 0x03;
+                    wf.amplitude  = amplitude;
+                    wf.offset     = wfOffset;
+                    wf.phaseShift = ((uint16_t)phaseH << 7) | phaseL;
+                    wf.period     = (period > 0) ? period : 1;
+                    wf.direction  = (direction > 0);
+                    wf.enable     = true;
+                }
+            }
+            break;
+
         default:
             // Unknown message type, ignore
             break;
