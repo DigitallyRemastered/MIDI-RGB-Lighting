@@ -314,6 +314,75 @@ void LightEngine::setCC(int ccNumber, int value) {
 }
 
 // ============================================================================
+// State Serialization
+// ============================================================================
+
+size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
+    if (!buf || bufLen < STATE_SIZE) return 0;
+
+    size_t i = 0;
+
+    // Header
+    buf[i++] = 0x4C;  // magic
+    buf[i++] = 0x01;  // version
+
+    // CC parameters 1-15 (0-127 each)
+    for (int cc = 1; cc <= 15; ++cc) {
+        buf[i++] = (uint8_t)getCC(cc);
+    }
+
+    // tempoBPM stored as uint16 = (int)(bpm * 10), big-endian
+    uint16_t bpmFixed = (uint16_t)(tempoBPM * 10.0f + 0.5f);
+    buf[i++] = (uint8_t)(bpmFixed >> 8);
+    buf[i++] = (uint8_t)(bpmFixed & 0xFF);
+
+    // Waveform configs: 15 × 8 bytes
+    for (int w = 0; w < 15; ++w) {
+        buf[i++] = waveforms[w].profile;
+        buf[i++] = waveforms[w].amplitude;
+        buf[i++] = waveforms[w].offset;
+        buf[i++] = (uint8_t)(waveforms[w].phaseShift & 0xFF);
+        buf[i++] = (uint8_t)(waveforms[w].phaseShift >> 8);
+        buf[i++] = waveforms[w].period;
+        buf[i++] = waveforms[w].direction ? 1 : 0;
+        buf[i++] = waveforms[w].enable    ? 1 : 0;
+    }
+
+    return i;  // == STATE_SIZE
+}
+
+bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
+    if (!buf || len < STATE_SIZE) return false;
+    if (buf[0] != 0x4C || buf[1] != 0x01) return false;
+
+    size_t i = 2;
+
+    // CC parameters 1-15
+    for (int cc = 1; cc <= 15; ++cc) {
+        setCC(cc, buf[i++]);
+    }
+
+    // tempoBPM
+    uint16_t bpmFixed = ((uint16_t)buf[i] << 8) | buf[i + 1];
+    i += 2;
+    tempoBPM = bpmFixed / 10.0f;
+
+    // Waveform configs
+    for (int w = 0; w < 15; ++w) {
+        waveforms[w].profile   = buf[i++];
+        waveforms[w].amplitude = buf[i++];
+        waveforms[w].offset    = buf[i++];
+        waveforms[w].phaseShift = (uint16_t)buf[i] | ((uint16_t)buf[i + 1] << 8);
+        i += 2;
+        waveforms[w].period    = buf[i++];
+        waveforms[w].direction = buf[i++] != 0;
+        waveforms[w].enable    = buf[i++] != 0;
+    }
+
+    return true;
+}
+
+// ============================================================================
 // Rendering Pipeline
 // ============================================================================
 

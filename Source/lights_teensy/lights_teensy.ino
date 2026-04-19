@@ -7,6 +7,7 @@
 
 #include <FastLED.h>
 #include <LightEngine.h>  // Library include
+#include <EEPROM.h>
 
 #define NUM_LEDS 108
 #define DATA_PIN 0
@@ -21,6 +22,41 @@ LightEngine engine(NUM_LEDS);
 elapsedMicros t;
 
 // ============================================================================
+// Persistent State
+// ============================================================================
+
+bool stateDirty = false;
+unsigned long lastChangeMillis = 0;
+const unsigned long SAVE_DEBOUNCE_MS = 2000;
+
+// EEPROM base address for saved state
+static const int EEPROM_BASE = 0;
+
+void saveState() {
+  uint8_t buf[LightEngine::STATE_SIZE];
+  size_t len = engine.serializeState(buf, sizeof(buf));
+  if (len == 0) return;
+  // EEPROM.update() only writes bytes that have actually changed,
+  // minimising wear on the Teensy 3.6's real hardware EEPROM.
+  for (size_t i = 0; i < len; ++i) {
+    EEPROM.update(EEPROM_BASE + i, buf[i]);
+  }
+  Serial.println("State saved");
+}
+
+void loadState() {
+  uint8_t buf[LightEngine::STATE_SIZE];
+  for (size_t i = 0; i < LightEngine::STATE_SIZE; ++i) {
+    buf[i] = EEPROM.read(EEPROM_BASE + i);
+  }
+  if (!engine.deserializeState(buf, LightEngine::STATE_SIZE)) {
+    Serial.println("No valid saved state, using defaults");
+  } else {
+    Serial.println("State loaded");
+  }
+}
+
+// ============================================================================
 // Setup & Loop
 // ============================================================================
 
@@ -33,6 +69,9 @@ void setup() {
   usbMIDI.setHandleSysEx(OnSysEx);
   
   Serial.begin(250000);
+
+  // Load persisted state before first render
+  loadState();
   
   // Initial render
   engine.render();
@@ -49,6 +88,12 @@ void loop() {
     FastLED.show();
     t = 0;
   }
+
+  // Debounced auto-save: write 2 seconds after the last state change
+  if (stateDirty && (millis() - lastChangeMillis >= SAVE_DEBOUNCE_MS)) {
+    saveState();
+    stateDirty = false;
+  }
 }
 
 // ============================================================================
@@ -64,22 +109,25 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
+  // Only mark dirty if this CC actually changes the engine state
+  if (engine.getCC(control) != value) {
+    stateDirty = true;
+    lastChangeMillis = millis();
+  }
   engine.handleControlChange(channel, control, value);
+  // Debug output
+  Serial.print("CC received:");
+  Serial.print(control);
+  Serial.print(" | value: ");
+  Serial.print(value);
+  Serial.println();
 }
 
 void OnSysEx(const byte* data, uint16_t length, bool complete) {
   // Only process complete SysEx messages
   if (complete) {
-        // Debug output - show first few bytes of received SysEx
-    // Serial.print("SysEx received (");
-    // Serial.print(length);
-    // Serial.print(" bytes): ");
-    // for (int i = 0; i < min(8, length); i++) {
-    //   Serial.print(data[i], HEX);
-    //   Serial.print(" ");
-    // }
-    // Serial.println();
-    
+    stateDirty = true;
+    lastChangeMillis = millis();
     engine.handleSysEx(data, length);
   }
 }

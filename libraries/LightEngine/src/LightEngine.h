@@ -133,6 +133,23 @@ public:
     // Set CC parameter value (0-127 range)
     void setCC(int ccNumber, int value);
     
+    // Serialized state layout (bytes):
+    //   [0]       magic = 0x4C
+    //   [1]       version = 0x01
+    //   [2..16]   CC1-15 values (0-127 each)          = 15 bytes
+    //   [17..18]  tempoBPM*10 as uint16, big-endian   =  2 bytes
+    //   [19..138] waveforms[15], 8 bytes each:         = 120 bytes
+    //               profile, amplitude, offset, phaseL, phaseH, period,
+    //               direction (0/1), enable (0/1)
+    //   Total: 2 + 15 + 2 + 120 = 139 bytes
+    static const size_t STATE_SIZE = 139;
+    
+    // Serialize current state into buf. Returns bytes written, or 0 on failure.
+    size_t serializeState(uint8_t* buf, size_t bufLen) const;
+    
+    // Restore state from buf. Returns false if magic/version invalid (state unchanged).
+    bool deserializeState(const uint8_t* buf, size_t len);
+    
 private:
     // ========================================================================
     // LED Buffers

@@ -9,6 +9,7 @@
 #include <AppleMIDI.h>
 #include <FastLED.h>
 #include <LightEngine.h>  // Library include
+#include <Preferences.h>
 
 // ============================================================================
 // Configuration - UPDATE THESE!
@@ -36,6 +37,43 @@ APPLEMIDI_CREATE_DEFAULTSESSION_INSTANCE();
 // Timer for 30Hz refresh rate
 unsigned long lastRender = 0;
 const unsigned long renderInterval = 33333; // microseconds (30Hz)
+
+// ============================================================================
+// Persistent State
+// ============================================================================
+
+Preferences prefs;
+
+bool stateDirty = false;
+unsigned long lastChangeMillis = 0;
+const unsigned long SAVE_DEBOUNCE_MS = 2000;
+
+void saveState() {
+  uint8_t buf[LightEngine::STATE_SIZE];
+  size_t len = engine.serializeState(buf, sizeof(buf));
+  if (len == 0) return;
+  prefs.begin("lights", false);
+  prefs.putBytes("state", buf, len);
+  prefs.end();
+  Serial.println("State saved");
+}
+
+void loadState() {
+  prefs.begin("lights", true);
+  size_t len = prefs.getBytesLength("state");
+  if (len == LightEngine::STATE_SIZE) {
+    uint8_t buf[LightEngine::STATE_SIZE];
+    prefs.getBytes("state", buf, len);
+    if (!engine.deserializeState(buf, len)) {
+      Serial.println("State load failed: invalid data, using defaults");
+    } else {
+      Serial.println("State loaded");
+    }
+  } else {
+    Serial.println("No saved state found, using defaults");
+  }
+  prefs.end();
+}
 
 // ============================================================================
 // Setup & Loop
@@ -82,6 +120,9 @@ void setup() {
   MIDI.setHandleControlChange(OnControlChange);
   MIDI.setHandleSystemExclusive(OnSysEx);
   
+  // Load persisted state before first render
+  loadState();
+
   Serial.println("Ready!");
   
   // Initial render
@@ -101,6 +142,12 @@ void loop() {
     FastLED.show();
     lastRender = now;
   }
+
+  // Debounced auto-save: write 2 seconds after the last state change
+  if (stateDirty && (millis() - lastChangeMillis >= SAVE_DEBOUNCE_MS)) {
+    saveState();
+    stateDirty = false;
+  }
 }
 
 // ============================================================================
@@ -116,12 +163,35 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
+  // Only mark dirty if this CC actually changes the engine state
+  if (engine.getCC(control) != value) {
+    stateDirty = true;
+    lastChangeMillis = millis();
+  }
   engine.handleControlChange(channel, control, value);
+
+  // Debug output
+  Serial.print("CC received:");
+  Serial.print(control);
+  Serial.print(" | value: ");
+  Serial.print(value);
+  Serial.println();
 }
 
 void OnSysEx(byte* data, unsigned int length) {
   // Only process complete SysEx messages
-    engine.handleSysEx(data, length);
+  stateDirty = true;
+  lastChangeMillis = millis();
+  engine.handleSysEx(data, length);
+     // Debug output - show first few bytes of received SysEx
+    // Serial.print("SysEx received (");
+    // Serial.print(length);
+    // Serial.print(" bytes): ");
+    // for (int i = 0; i < min(8, length); i++) {
+    //   Serial.print(data[i], HEX);
+    //   Serial.print(" ");
+    // }
+    // Serial.println();
 }
 
 // ============================================================================
