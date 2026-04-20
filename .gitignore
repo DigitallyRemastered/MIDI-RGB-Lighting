@@ -1,3 +1,6 @@
+# Credentials — never commit these
+Source/lights_esp32/secrets.h
+
 # Build directories
 build/
 out/
