@@ -82,16 +82,28 @@ function Link-Library {
         }
     }
 
+    # Try junction first (no admin required); fall back to symlink (needs admin)
+    $linked = $false
     try {
-        New-Item -ItemType SymbolicLink -Path $symlinkPath -Target $repoLib -ErrorAction Stop | Out-Null
-        Write-Host "  ✓ Linked $name" -ForegroundColor Green
+        New-Item -ItemType Junction -Path $symlinkPath -Target $repoLib -ErrorAction Stop | Out-Null
+        Write-Host "  ✓ Linked $name (junction)" -ForegroundColor Green
         Write-Host "      → $repoLib" -ForegroundColor Gray
         Write-Host ""
-    } catch {
-        Write-Host "  ERROR: Failed to create symlink for $name" -ForegroundColor Red
-        Write-Host "  This script must be run as Administrator." -ForegroundColor Yellow
-        Write-Host "  Error: $_" -ForegroundColor Red
-        Write-Host ""
+        $linked = $true
+    } catch {}
+
+    if (-not $linked) {
+        try {
+            New-Item -ItemType SymbolicLink -Path $symlinkPath -Target $repoLib -ErrorAction Stop | Out-Null
+            Write-Host "  ✓ Linked $name (symlink)" -ForegroundColor Green
+            Write-Host "      → $repoLib" -ForegroundColor Gray
+            Write-Host ""
+        } catch {
+            Write-Host "  ERROR: Failed to link $name" -ForegroundColor Red
+            Write-Host "  Try running this script as Administrator." -ForegroundColor Yellow
+            Write-Host "  Error: $_" -ForegroundColor Red
+            Write-Host ""
+        }
     }
 }
 
