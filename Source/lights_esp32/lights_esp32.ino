@@ -147,11 +147,11 @@ void setup() {
   });
 
   // Reuse the same handlers — both transports feed the same engine
-  BLEMidiServer.setHandleNoteOn(OnNoteOn);
-  BLEMidiServer.setHandleNoteOff(OnNoteOff);
-  BLEMidiServer.setHandleControlChange(OnControlChange);
-  // Note: SysEx (waveform config) is not forwarded over BLE-MIDI in this version;
-  // waveform automation is a DAW/PC feature. BLE-MIDI carries CC1-15 only.
+  // BLE-MIDI callbacks include a timestamp parameter; bridge to the shared handlers
+  BLEMidiServer.setNoteOnCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOn(ch, note, vel); });
+  BLEMidiServer.setNoteOffCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOff(ch, note, vel); });
+  BLEMidiServer.setControlChangeCallback([](uint8_t ch, uint8_t ctrl, uint8_t val, uint16_t) { OnControlChange(ch, ctrl, val); });
+  BLEMidiServer.setSysExCallback([](uint8_t *data, uint16_t length, uint16_t) { OnSysEx(data, length); });
   
   // Load persisted state before first render
   loadState();
@@ -204,10 +204,21 @@ void loop() {
 
 void OnNoteOn(byte channel, byte note, byte velocity) {
   engine.handleNoteOn(channel, note, velocity);
+
+  Serial.print("Note On received on channel: ");
+  Serial.print(channel);
+  Serial.print(" | note: ");
+  Serial.print(note);
+  Serial.println();
 }
 
 void OnNoteOff(byte channel, byte note, byte velocity) {
   engine.handleNoteOff(channel, note, velocity);
+  Serial.print("Note Off received on channel: ");
+  Serial.print(channel);
+  Serial.print(" | note: ");
+  Serial.print(note);
+  Serial.println();
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
@@ -231,15 +242,15 @@ void OnSysEx(byte* data, unsigned int length) {
   stateDirty = true;
   lastChangeMillis = millis();
   engine.handleSysEx(data, length);
-     // Debug output - show first few bytes of received SysEx
-    // Serial.print("SysEx received (");
-    // Serial.print(length);
-    // Serial.print(" bytes): ");
-    // for (int i = 0; i < min(8, length); i++) {
-    //   Serial.print(data[i], HEX);
-    //   Serial.print(" ");
-    // }
-    // Serial.println();
+  // Debug output - show first few bytes of received SysEx
+    Serial.print("SysEx received (");
+    Serial.print(length);
+    Serial.print(" bytes): ");
+    for (int i = 0; i < (int)min((unsigned int)8, length); i++) {
+      Serial.print(data[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
 }
 
 // ============================================================================

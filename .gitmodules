@@ -1,0 +1,6 @@
+[submodule "libraries/ESP32-BLE-MIDI"]
+	path = libraries/ESP32-BLE-MIDI
+	url = https://github.com/DigitallyRemastered/ESP32-BLE-MIDI
+[submodule "libraries/NimBLE-Arduino"]
+	path = libraries/NimBLE-Arduino
+	url = https://github.com/DigitallyRemastered/NimBLE-Arduino
