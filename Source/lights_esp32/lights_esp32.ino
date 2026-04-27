@@ -27,7 +27,7 @@
 
 #define NUM_LEDS 108
 #define DATA_PIN 2  // GPIO 2 (safer than GPIO 0 on ESP32)
-#define BLE_DEVICE_NAME "DR LightStudio"  // shown in Bluetooth scan lists
+#define BLE_DEVICE_NAME "DR Perform 1"  // shown in Bluetooth scan lists
 
 // ============================================================================
 // Hardware Setup
@@ -238,10 +238,20 @@ void OnControlChange(byte channel, byte control, byte value) {
 }
 
 void OnSysEx(byte* data, unsigned int length) {
-  // Only process complete SysEx messages
   stateDirty = true;
   lastChangeMillis = millis();
-  engine.handleSysEx(data, length);
+
+  // The BLE-MIDI parser (and rtpMIDI library) strip the 0xF0/0xF7 framing before
+  // invoking this callback, but LightEngine::handleSysEx validates data[0]==0xF0.
+  // Reconstruct the full framed message on the stack before forwarding.
+  if (length <= 254) {
+    byte framedData[256];
+    framedData[0] = 0xF0;
+    memcpy(framedData + 1, data, length);
+    framedData[length + 1] = 0xF7;
+    engine.handleSysEx(framedData, length + 2);
+  }
+
   // Debug output - show first few bytes of received SysEx
     Serial.print("SysEx received (");
     Serial.print(length);
