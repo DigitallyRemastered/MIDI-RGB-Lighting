@@ -136,6 +136,7 @@ void setup() {
 
   // --- BLE-MIDI (NimBLE) ---
   BLEMidiServer.begin(BLE_DEVICE_NAME);
+  BLEMidiServer.enableDebugging(Serial);  // Print raw packet bytes to serial for diagnostics
 
   BLEMidiServer.setOnConnectCallback([]() {
     bleConnected = true;
@@ -241,10 +242,15 @@ void OnSysEx(byte* data, unsigned int length) {
   stateDirty = true;
   lastChangeMillis = millis();
 
-  // The BLE-MIDI parser (and rtpMIDI library) strip the 0xF0/0xF7 framing before
-  // invoking this callback, but LightEngine::handleSysEx validates data[0]==0xF0.
-  // Reconstruct the full framed message on the stack before forwarding.
-  if (length <= 254) {
+  // Different MIDI transports deliver different framing:
+  //   rtpMIDI (Arduino MIDI Library) includes 0xF0/0xF7 in the callback data.
+  //   BLE-MIDI (custom Midi.cpp parser)  strips 0xF0/0xF7 — only data bytes.
+  // engine.handleSysEx() requires full [F0 ... F7] framing.
+  if (length > 0 && data[0] == 0xF0) {
+    // Already framed — pass directly (rtpMIDI path)
+    engine.handleSysEx(data, length);
+  } else if (length <= 254) {
+    // Unframed — reconstruct framing (BLE-MIDI path)
     byte framedData[256];
     framedData[0] = 0xF0;
     memcpy(framedData + 1, data, length);
