@@ -113,6 +113,10 @@ void setup() {
     Serial.print(".");
   }
   
+  // Disable modem sleep — eliminates the 50-100ms beacon-interval latency that
+  // wrecks rtpMIDI. Costs a few extra mA but is essential for real-time MIDI.
+  WiFi.setSleep(false);
+
   Serial.println("\nWiFi Connected!");
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
