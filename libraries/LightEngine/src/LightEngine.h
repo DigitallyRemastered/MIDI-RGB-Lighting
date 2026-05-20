@@ -149,6 +149,11 @@ public:
     
     // Restore state from buf. Returns false if magic/version invalid (state unchanged).
     bool deserializeState(const uint8_t* buf, size_t len);
+
+    // Returns true (and clears the flag) if a save-state SysEx (0x06) was received
+    // since the last call.  Firmware should call this once per loop() and persist
+    // state to non-volatile memory when it returns true.
+    bool saveStateRequested();
     
 private:
     // ========================================================================
@@ -210,6 +215,9 @@ private:
     // Constants (defined in LightEngine.cpp)
     // ========================================================================
     static const int COLOR_PHASE[64];
+
+    // Set by handleSysEx(0x06); cleared and returned by saveStateRequested().
+    bool _saveStateRequested = false;
     
     // ========================================================================
     // Internal Rendering Methods

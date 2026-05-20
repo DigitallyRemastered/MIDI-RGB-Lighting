@@ -232,6 +232,8 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     // Initialize LEDs to black (off)
     memset(leds, 0, numLeds * sizeof(HSVColor));
     memset(background, 0, numLeds * sizeof(HSVColor));
+    
+    _saveStateRequested = false;
 }
 
 LightEngine::~LightEngine() {
@@ -734,6 +736,12 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             frameCounter = 0;
             break;
 
+        case 0x06:  // Save state to persistent memory
+            // Format: [F0, 7D, 06, F7]
+            // Sets a flag that the host firmware should poll via saveStateRequested().
+            _saveStateRequested = true;
+            break;
+
         case 0x05:  // Enable waveform with full config (atomic)
             // Format: [F0, 7D, 05, cc, profile, amplitude, offset, phaseShiftL, phaseShiftH, period, direction, F7]
             // Sends all waveform parameters + enable=true in a single message to avoid UDP split.
@@ -769,6 +777,14 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
 // ============================================================================
 // C API Implementation (Windows DLL)
 // ============================================================================
+
+bool LightEngine::saveStateRequested() {
+    if (_saveStateRequested) {
+        _saveStateRequested = false;
+        return true;
+    }
+    return false;
+}
 
 #ifndef ARDUINO
 

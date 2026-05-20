@@ -27,7 +27,7 @@
 
 #define NUM_LEDS 108
 #define DATA_PIN 2  // GPIO 2 (safer than GPIO 0 on ESP32)
-#define BLE_DEVICE_NAME "DR Perform 1"  // shown in Bluetooth scan lists
+#define BLE_DEVICE_NAME "DR Perform 2"  // shown in Bluetooth scan lists
 
 // ============================================================================
 // Hardware Setup
@@ -60,10 +60,6 @@ unsigned long renderCount = 0;
 // ============================================================================
 
 Preferences prefs;
-
-bool stateDirty = false;
-unsigned long lastChangeMillis = 0;
-const unsigned long SAVE_DEBOUNCE_MS = 2000;
 
 void saveState() {
   uint8_t buf[LightEngine::STATE_SIZE];
@@ -196,10 +192,9 @@ void loop() {
     maxRenderJitter = 0; // reset per window
   }
 
-  // Debounced auto-save: write 2 seconds after the last state change
-  if (stateDirty && (millis() - lastChangeMillis >= SAVE_DEBOUNCE_MS)) {
+  // Save state when the plugin sends a save-state SysEx (0x06)
+  if (engine.saveStateRequested()) {
     saveState();
-    stateDirty = false;
   }
 }
 
@@ -227,11 +222,6 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
-  // Only mark dirty if this CC actually changes the engine state
-  if (engine.getCC(control) != value) {
-    stateDirty = true;
-    lastChangeMillis = millis();
-  }
   engine.handleControlChange(channel, control, value);
 
   // Debug output
@@ -243,9 +233,6 @@ void OnControlChange(byte channel, byte control, byte value) {
 }
 
 void OnSysEx(byte* data, unsigned int length) {
-  stateDirty = true;
-  lastChangeMillis = millis();
-
   // Different MIDI transports deliver different framing:
   //   rtpMIDI (Arduino MIDI Library) includes 0xF0/0xF7 in the callback data.
   //   BLE-MIDI (custom Midi.cpp parser)  strips 0xF0/0xF7 — only data bytes.

@@ -25,10 +25,6 @@ elapsedMicros t;
 // Persistent State
 // ============================================================================
 
-bool stateDirty = false;
-unsigned long lastChangeMillis = 0;
-const unsigned long SAVE_DEBOUNCE_MS = 2000;
-
 // EEPROM base address for saved state
 static const int EEPROM_BASE = 0;
 
@@ -89,10 +85,9 @@ void loop() {
     t = 0;
   }
 
-  // Debounced auto-save: write 2 seconds after the last state change
-  if (stateDirty && (millis() - lastChangeMillis >= SAVE_DEBOUNCE_MS)) {
+  // Save state when the plugin sends a save-state SysEx (0x06)
+  if (engine.saveStateRequested()) {
     saveState();
-    stateDirty = false;
   }
 }
 
@@ -109,11 +104,6 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
-  // Only mark dirty if this CC actually changes the engine state
-  if (engine.getCC(control) != value) {
-    stateDirty = true;
-    lastChangeMillis = millis();
-  }
   engine.handleControlChange(channel, control, value);
   // Debug output
   Serial.print("CC received:");
@@ -126,8 +116,6 @@ void OnControlChange(byte channel, byte control, byte value) {
 void OnSysEx(const byte* data, uint16_t length, bool complete) {
   // Only process complete SysEx messages
   if (complete) {
-    stateDirty = true;
-    lastChangeMillis = millis();
     engine.handleSysEx(data, length);
   }
 }
