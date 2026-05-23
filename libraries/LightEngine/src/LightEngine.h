@@ -44,39 +44,36 @@ enum WaveshapeProfile {
 // ============================================================================
 // TemporalConfig — time-varying modulation of a single scalar parameter.
 // Controls how a parameter oscillates in sync with DAW tempo.
-// Distinct from the spatial waveshape that ColorPanel uses to distribute
-// color across the LED strip.
+// The TC.offset field is the static/base value; amplitude > 0 adds oscillation.
+// Always active — there is no enable flag.
 // ============================================================================
 
 struct TemporalConfig {
     uint8_t  profile;      // WaveshapeProfile (0-3)
     uint8_t  amplitude;    // 0-127: oscillation magnitude
-    uint8_t  offset;       // 0-127: static base value
+    uint8_t  offset;       // 0-127: base value (static value when amplitude = 0)
     uint16_t phaseShift;   // 0-16383: frame offset for phase alignment
     uint8_t  period;       // 1-127: number of beats per cycle
     bool     direction;    // true = forward, false = reverse
-    bool     enable;       // true = modulate, false = pass CC value through
 };
 
 // ============================================================================
-// ColorPanel — defines one color dimension (Hue, Saturation, or Value)
+// ColorComponent — defines one color dimension (Hue, Saturation, or Value)
 // as a spatial waveform across the LED strip.  Each of the four spatial
-// parameters can be independently time-modulated by a TemporalConfig.
+// parameters is fully controlled by its own always-active TemporalConfig;
+// TC.offset is the static/base value and TC.amplitude adds time oscillation.
 // ============================================================================
 
-struct ColorPanel {
-    // Spatial waveform (how the value varies across LEDs)
-    uint8_t waveshape;   // WaveshapeProfile: shape of spatial distribution
-    uint8_t amplitude;   // 0-127: spatial oscillation depth (×2 → 0-254)
-    uint8_t offset;      // 0-127: base value (×2 → 0-254 for H/S/V space)
-    uint8_t wavelength;  // 0-127: LEDs per spatial cycle (0 = flat / no wave)
-    uint8_t phaseShift;  // 0-127: spatial start offset in LEDs
+struct ColorComponent {
+    // Spatial waveform shape (how the value varies across LEDs)
+    uint8_t waveshape;   // WaveshapeProfile: spatial distribution shape
 
-    // Independent temporal modulation for each spatial parameter
-    TemporalConfig ampTemporal;         // modulates amplitude
-    TemporalConfig offsetTemporal;      // modulates offset
-    TemporalConfig wavelengthTemporal;  // modulates wavelength
-    TemporalConfig phaseShiftTemporal;  // modulates phaseShift
+    // Each spatial parameter is managed entirely by its TemporalConfig.
+    // TC.offset = static baseline; TC.amplitude > 0 adds time-varying modulation.
+    TemporalConfig ampTemporal;          // controls spatial amplitude
+    TemporalConfig offsetTemporal;       // controls spatial offset (base color value)
+    TemporalConfig wavelengthTemporal;   // controls spatial wavelength (LEDs per cycle)
+    TemporalConfig phaseShiftTemporal;   // controls spatial phase shift (start LED offset)
 };
 
 // ============================================================================
@@ -111,14 +108,13 @@ enum LayerMode {
 static const int MAX_COMET_POLY = 16;  // Maximum simultaneous comets per layer
 
 struct Layer {
-    bool       enabled;                    // false = zero effect; skipped entirely
-    uint8_t    mode;                       // LayerMode
-    ColorPanel hue;                        // Hue panel
-    ColorPanel sat;                        // Saturation panel
-    ColorPanel val;                        // Value (brightness) panel
-    uint8_t    lines;                      // Parallel line count for repeating patterns
-    uint8_t    opacity;                    // 0-127: blend weight (0=transparent, 127=opaque)
-    CometState comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet mode)
+    uint8_t        mode;                       // LayerMode
+    ColorComponent hue;                        // Hue color component
+    ColorComponent sat;                        // Saturation color component
+    ColorComponent val;                        // Value (brightness) color component
+    TemporalConfig linesTemporal;              // controls number of parallel lines
+    uint8_t        opacity;                    // 0-127: blend weight (0 = skip rendering)
+    CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet mode)
 };
 
 // ============================================================================
@@ -181,13 +177,13 @@ public:
 
     /**
      * Get a CC parameter value (0-127) for a specific layer (0-15).
-     * CC  1        = Mode (LayerMode 0-6)
-     * CC  2- 6     = Hue panel:  Waveshape, Amplitude, Offset, Wavelength, PhaseShift
-     * CC  7-11     = Sat panel:  same order
-     * CC 12-16     = Val panel:  same order
-     * CC 17        = Lines
-     * CC 18        = Opacity (0-127)
-     * CC 19        = Enabled (0 = disabled, 1 = enabled)
+     * CC 1 = Mode (LayerMode 0-6)
+     * CC 2 = Opacity (0-127; 0 = layer skipped entirely)
+     * CC 3 = Hue Waveshape  (0-3)
+     * CC 4 = Sat Waveshape  (0-3)
+     * CC 5 = Val Waveshape  (0-3)
+     * All spatial amplitude/offset/wavelength/phaseShift are set via SysEx
+     * TemporalConfig messages (0x07 full / 0x08 single field).
      */
     int  getLayerCC(int layer, int cc) const;
 
@@ -198,18 +194,17 @@ public:
 
     // Serialized state layout:
     //   [0]    magic   = 0x4C
-    //   [1]    version = 0x02
+    //   [1]    version = 0x03
     //   [2-3]  tempoBPM*10 as uint16, big-endian
-    //   [4..]  16 layers × 115 bytes each:
-    //            enabled(1), mode(1), lines(1), opacity(1)  =   4 bytes
-    //            hue ColorPanel: waveshape+amp+offset+wl+ps  =   5 bytes
-    //              + 4 TemporalConfigs × 8 bytes             =  32 bytes
-    //                                                           37 bytes/panel
-    //            sat ColorPanel: 37 bytes
-    //            val ColorPanel: 37 bytes
-    //          = 4 + 3×37 = 115 bytes per layer
-    //   Total: 4 + 16×115 = 1844 bytes
-    static const size_t STATE_SIZE = 1844;
+    //   [4..]  16 layers × 96 bytes each:
+    //            mode(1), opacity(1)                             =   2 bytes
+    //            hue ColorComponent: waveshape(1) + 4×7 TC       =  29 bytes
+    //            sat ColorComponent: 29 bytes
+    //            val ColorComponent: 29 bytes
+    //            linesTemporal: 7 bytes
+    //          = 2 + 3×29 + 7 = 96 bytes per layer
+    //   Total: 4 + 16×96 = 1540 bytes
+    static const size_t STATE_SIZE = 1540;
 
     size_t serializeState  (uint8_t* buf, size_t bufLen) const;
     bool   deserializeState(const uint8_t* buf, size_t len);
@@ -267,6 +262,7 @@ private:
         float hueAmp, hueOffset, hueWavelength, huePhase;
         float satAmp, satOffset, satWavelength, satPhase;
         float valAmp, valOffset, valWavelength, valPhase;
+        float lines;
     };
 
     // ========================================================================
@@ -287,15 +283,15 @@ private:
     // Utility
     void setLED(HSVColor* buf, int index, uint8_t h, uint8_t s, uint8_t v);
 
-    // Evaluate a ColorPanel's spatial waveform at a single LED index.
+    // Evaluate a ColorComponent's spatial waveform at a single LED index.
     // Returns a raw float (may exceed 0-254 before clamping/wrapping by caller).
-    float evalPanel(const ColorPanel& panel, int ledIndex,
+    float evalPanel(const ColorComponent& panel, int ledIndex,
                     float effAmp, float effOffset,
                     float effWavelength, float effPhase) const;
 
     // Temporal modulation helpers
     float evaluateTemporalWaveform(int profile, float phase, bool direction) const;
-    float applyTemporalConfig(const TemporalConfig& tc, float baseValue) const;
+    float applyTemporalConfig(const TemporalConfig& tc) const;
 };
 
 // ============================================================================

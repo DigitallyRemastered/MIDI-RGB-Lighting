@@ -1,4 +1,4 @@
-/*
+﻿/*
   Light Engine - Implementation
 
   All rendering logic, constants, and metadata in one place.
@@ -32,24 +32,10 @@ const int LightEngine::COLOR_PHASE[64] = {
 
 static const ParameterInfo PARAMETER_TABLE[] = {
     { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=BackForth,5=Flash,6=GravityComet)"},
-    { 2, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
-    { 3, "Hue Amplitude",  "Spatial oscillation depth of hue (0-127, x2 -> 0-254)"},
-    { 4, "Hue Offset",     "Base hue value (0-127, x2 -> 0-254)"},
-    { 5, "Hue Wavelength", "LEDs per hue spatial cycle (0 = flat)"},
-    { 6, "Hue PhaseShift", "Spatial start offset of hue wave in LEDs"},
-    { 7, "Sat Waveshape",  "Spatial waveshape for saturation"},
-    { 8, "Sat Amplitude",  "Spatial oscillation depth of saturation"},
-    { 9, "Sat Offset",     "Base saturation value"},
-    {10, "Sat Wavelength", "LEDs per saturation spatial cycle (0 = flat)"},
-    {11, "Sat PhaseShift", "Spatial start offset of saturation wave in LEDs"},
-    {12, "Val Waveshape",  "Spatial waveshape for brightness"},
-    {13, "Val Amplitude",  "Spatial oscillation depth of brightness"},
-    {14, "Val Offset",     "Base brightness value"},
-    {15, "Val Wavelength", "LEDs per brightness spatial cycle (0 = flat)"},
-    {16, "Val PhaseShift", "Spatial start offset of brightness wave in LEDs"},
-    {17, "Lines",          "Number of parallel repeated lines (MovingDots, Comets)"},
-    {18, "Opacity",        "Layer blend weight (0=transparent, 127=opaque)"},
-    {19, "Enabled",        "Layer active state (0=disabled, 1=enabled)"}
+    { 2, "Opacity",        "Layer blend weight (0=transparent/skip, 127=opaque)"},
+    { 3, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
+    { 4, "Sat Waveshape",  "Spatial waveshape for saturation"},
+    { 5, "Val Waveshape",  "Spatial waveshape for brightness"}
 };
 
 static const ModeInfo MODE_TABLE[] = {
@@ -63,13 +49,13 @@ static const ModeInfo MODE_TABLE[] = {
 };
 
 const ParameterInfo* getParameterInfo(int ccNumber) {
-    if (ccNumber < 1 || ccNumber > 19) return nullptr;
+    if (ccNumber < 1 || ccNumber > 5) return nullptr;
     return &PARAMETER_TABLE[ccNumber - 1];
 }
 
 int getAllParameters(const ParameterInfo** outArray) {
     *outArray = PARAMETER_TABLE;
-    return 19;
+    return 5;
 }
 
 int getModeCount() {
@@ -88,23 +74,18 @@ const ModeInfo* getModeInfo(int modeId) {
 static void initTemporalConfig(TemporalConfig& tc) {
     tc.profile    = WAVESHAPE_SAWTOOTH;
     tc.amplitude  = 0;
-    tc.offset     = 64;
+    tc.offset     = 0;     // caller sets meaningful default after this
     tc.phaseShift = 0;
     tc.period     = 4;
     tc.direction  = true;
-    tc.enable     = false;
 }
 
-static void initColorPanel(ColorPanel& p) {
-    p.waveshape  = WAVESHAPE_SAWTOOTH;
-    p.amplitude  = 0;
-    p.offset     = 0;
-    p.wavelength = 127;
-    p.phaseShift = 0;
-    initTemporalConfig(p.ampTemporal);
-    initTemporalConfig(p.offsetTemporal);
-    initTemporalConfig(p.wavelengthTemporal);
-    initTemporalConfig(p.phaseShiftTemporal);
+static void initColorComponent(ColorComponent& p, uint8_t defOffset, uint8_t defWavelength) {
+    p.waveshape = WAVESHAPE_SAWTOOTH;
+    initTemporalConfig(p.ampTemporal);         p.ampTemporal.offset         = 0;             // no amplitude variation
+    initTemporalConfig(p.offsetTemporal);      p.offsetTemporal.offset      = defOffset;     // base color value
+    initTemporalConfig(p.wavelengthTemporal);  p.wavelengthTemporal.offset  = defWavelength; // LEDs per cycle
+    initTemporalConfig(p.phaseShiftTemporal);  p.phaseShiftTemporal.offset  = 0;             // no phase offset
 }
 
 LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
@@ -113,16 +94,15 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
         layerBuffers[li] = new HSVColor[numLeds];
     }
 
-    // All layers start disabled with default (off) state
+    // All layers start with opacity=0 (invisible) and MODE_OFF
     for (int li = 0; li < MAX_LAYERS; li++) {
         Layer& layer = layers[li];
-        layer.enabled = false;
         layer.mode    = MODE_OFF;
-        layer.lines   = 1;
-        layer.opacity = 127;
-        initColorPanel(layer.hue);
-        initColorPanel(layer.sat);
-        initColorPanel(layer.val);
+        layer.opacity = 0;
+        initColorComponent(layer.hue, 0,   127);  // hue:  offset=0,   wl=127
+        initColorComponent(layer.sat, 127, 127);  // sat:  offset=127 (full), wl=127
+        initColorComponent(layer.val, 64,  127);  // val:  offset=64  (half), wl=127
+        initTemporalConfig(layer.linesTemporal);  layer.linesTemporal.offset = 1;  // 1 line
         for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
             layer.comets[ci].active   = false;
             layer.comets[ci].position = 0.0f;
@@ -153,57 +133,25 @@ LightEngine::~LightEngine() {
 // MIDI Event Handlers
 // ============================================================================
 
-// Write a single spatial parameter of a ColorPanel from a CC value (0-127).
-// fieldIdx: 0=waveshape, 1=amplitude, 2=offset, 3=wavelength, 4=phaseShift
-static void setPanelField(ColorPanel& p, int fieldIdx, uint8_t value) {
-    switch (fieldIdx) {
-        case 0: p.waveshape  = value & 0x03; break;
-        case 1: p.amplitude  = value; break;
-        case 2: p.offset     = value; break;
-        case 3: p.wavelength = value; break;
-        case 4: p.phaseShift = value; break;
-    }
-}
-
-// Read a single spatial parameter of a ColorPanel as a CC value (0-127).
-static uint8_t getPanelField(const ColorPanel& p, int fieldIdx) {
-    switch (fieldIdx) {
-        case 0: return p.waveshape;
-        case 1: return p.amplitude;
-        case 2: return p.offset;
-        case 3: return p.wavelength;
-        case 4: return p.phaseShift;
-        default: return 0;
-    }
-}
-
 void LightEngine::handleControlChange(uint8_t channel, uint8_t control, uint8_t value) {
     // MIDI channel 1-16 selects layers[channel-1]
     if (channel < 1 || channel > 16) return;
     int li = channel - 1;
     Layer& layer = layers[li];
 
-    // CC  1        = Mode
-    // CC  2- 6     = Hue panel: waveshape, amplitude, offset, wavelength, phaseShift
-    // CC  7-11     = Sat panel: same order
-    // CC 12-16     = Val panel: same order
-    // CC 17        = Lines
-    // CC 18        = Opacity
-    // CC 19        = Enabled (0=off, >0=on)
-    if (control == 1) {
-        layer.mode = value;
-    } else if (control >= 2 && control <= 6) {
-        setPanelField(layer.hue, control - 2, value);
-    } else if (control >= 7 && control <= 11) {
-        setPanelField(layer.sat, control - 7, value);
-    } else if (control >= 12 && control <= 16) {
-        setPanelField(layer.val, control - 12, value);
-    } else if (control == 17) {
-        layer.lines = value;
-    } else if (control == 18) {
-        layer.opacity = value;
-    } else if (control == 19) {
-        layer.enabled = (value > 0);
+    // CC 1 = Mode
+    // CC 2 = Opacity (0=transparent/skip, 127=opaque)
+    // CC 3 = Hue Waveshape  (0-3)
+    // CC 4 = Sat Waveshape  (0-3)
+    // CC 5 = Val Waveshape  (0-3)
+    // All spatial amp/offset/wl/phase are set via SysEx TemporalConfig messages.
+    switch (control) {
+        case 1:  layer.mode              = value % 7;    break;
+        case 2:  layer.opacity           = value;        break;
+        case 3:  layer.hue.waveshape     = value & 0x03; break;
+        case 4:  layer.sat.waveshape     = value & 0x03; break;
+        case 5:  layer.val.waveshape     = value & 0x03; break;
+        default: break;
     }
 }
 
@@ -216,7 +164,7 @@ void LightEngine::handleNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) 
     int li = channel - 1;
     Layer& layer = layers[li];
 
-    if (layer.enabled && layer.mode == MODE_GRAVITY_COMET) {
+    if (layer.mode == MODE_GRAVITY_COMET) {
         // Find a free comet slot and launch it toward the note's target LED
         for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
             if (!layer.comets[ci].active) {
@@ -250,14 +198,14 @@ int LightEngine::getLayerCC(int layer, int cc) const {
     if (layer < 0 || layer >= MAX_LAYERS) return 0;
     const Layer& l = layers[layer];
 
-    if (cc == 1)              return l.mode;
-    if (cc >= 2  && cc <= 6)  return getPanelField(l.hue, cc - 2);
-    if (cc >= 7  && cc <= 11) return getPanelField(l.sat, cc - 7);
-    if (cc >= 12 && cc <= 16) return getPanelField(l.val, cc - 12);
-    if (cc == 17)             return l.lines;
-    if (cc == 18)             return l.opacity;
-    if (cc == 19)             return l.enabled ? 1 : 0;
-    return 0;
+    switch (cc) {
+        case 1: return l.mode;
+        case 2: return l.opacity;
+        case 3: return l.hue.waveshape;
+        case 4: return l.sat.waveshape;
+        case 5: return l.val.waveshape;
+        default: return 0;
+    }
 }
 
 void LightEngine::setLayerCC(int layer, int cc, int value) {
@@ -278,8 +226,7 @@ static size_t serializeTC(uint8_t* buf, const TemporalConfig& tc) {
     buf[4] = (uint8_t)(tc.phaseShift >> 8);
     buf[5] = tc.period;
     buf[6] = tc.direction ? 1 : 0;
-    buf[7] = tc.enable    ? 1 : 0;
-    return 8;
+    return 7;  // enable byte removed
 }
 
 static size_t deserializeTC(const uint8_t* buf, TemporalConfig& tc) {
@@ -289,36 +236,27 @@ static size_t deserializeTC(const uint8_t* buf, TemporalConfig& tc) {
     tc.phaseShift = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
     tc.period     = (buf[5] > 0) ? buf[5] : 1;
     tc.direction  = buf[6] != 0;
-    tc.enable     = buf[7] != 0;
-    return 8;
+    return 7;
 }
 
-static size_t serializePanel(uint8_t* buf, const ColorPanel& p) {
+static size_t serializeComponent(uint8_t* buf, const ColorComponent& p) {
     buf[0] = p.waveshape;
-    buf[1] = p.amplitude;
-    buf[2] = p.offset;
-    buf[3] = p.wavelength;
-    buf[4] = p.phaseShift;
-    size_t off = 5;
+    size_t off = 1;
     off += serializeTC(buf + off, p.ampTemporal);
     off += serializeTC(buf + off, p.offsetTemporal);
     off += serializeTC(buf + off, p.wavelengthTemporal);
     off += serializeTC(buf + off, p.phaseShiftTemporal);
-    return off;  // 37
+    return off;  // 1 + 4*7 = 29
 }
 
-static size_t deserializePanel(const uint8_t* buf, ColorPanel& p) {
-    p.waveshape  = buf[0] & 0x03;
-    p.amplitude  = buf[1];
-    p.offset     = buf[2];
-    p.wavelength = buf[3];
-    p.phaseShift = buf[4];
-    size_t off = 5;
+static size_t deserializeComponent(const uint8_t* buf, ColorComponent& p) {
+    p.waveshape = buf[0] & 0x03;
+    size_t off = 1;
     off += deserializeTC(buf + off, p.ampTemporal);
     off += deserializeTC(buf + off, p.offsetTemporal);
     off += deserializeTC(buf + off, p.wavelengthTemporal);
     off += deserializeTC(buf + off, p.phaseShiftTemporal);
-    return off;  // 37
+    return off;  // 29
 }
 
 size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
@@ -326,23 +264,22 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
     size_t i = 0;
 
     buf[i++] = 0x4C;  // magic
-    buf[i++] = 0x02;  // version
+    buf[i++] = 0x03;  // version
 
     // tempoBPM as uint16 (BPM*10), big-endian
     uint16_t bpmFixed = (uint16_t)(tempoBPM * 10.0f + 0.5f);
     buf[i++] = (uint8_t)(bpmFixed >> 8);
     buf[i++] = (uint8_t)(bpmFixed & 0xFF);
 
-    // 16 layers x 115 bytes each
+    // 16 layers x 96 bytes each
     for (int li = 0; li < MAX_LAYERS; li++) {
         const Layer& layer = layers[li];
-        buf[i++] = layer.enabled ? 1 : 0;
         buf[i++] = layer.mode;
-        buf[i++] = layer.lines;
         buf[i++] = layer.opacity;
-        i += serializePanel(buf + i, layer.hue);
-        i += serializePanel(buf + i, layer.sat);
-        i += serializePanel(buf + i, layer.val);
+        i += serializeComponent(buf + i, layer.hue);
+        i += serializeComponent(buf + i, layer.sat);
+        i += serializeComponent(buf + i, layer.val);
+        i += serializeTC(buf + i, layer.linesTemporal);
     }
 
     return i;  // == STATE_SIZE
@@ -350,7 +287,7 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
 
 bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
     if (!buf || len < STATE_SIZE) return false;
-    if (buf[0] != 0x4C || buf[1] != 0x02) return false;
+    if (buf[0] != 0x4C || buf[1] != 0x03) return false;
 
     size_t i = 2;
 
@@ -360,13 +297,12 @@ bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
 
     for (int li = 0; li < MAX_LAYERS; li++) {
         Layer& layer = layers[li];
-        layer.enabled = buf[i++] != 0;
         layer.mode    = buf[i++];
-        layer.lines   = buf[i++];
         layer.opacity = buf[i++];
-        i += deserializePanel(buf + i, layer.hue);
-        i += deserializePanel(buf + i, layer.sat);
-        i += deserializePanel(buf + i, layer.val);
+        i += deserializeComponent(buf + i, layer.hue);
+        i += deserializeComponent(buf + i, layer.sat);
+        i += deserializeComponent(buf + i, layer.val);
+        i += deserializeTC(buf + i, layer.linesTemporal);
     }
 
     return true;
@@ -380,7 +316,7 @@ void LightEngine::render() {
     frameCounter++;
 
     for (int li = 0; li < MAX_LAYERS; li++) {
-        if (!layers[li].enabled || layers[li].mode == MODE_OFF) continue;
+        if (layers[li].opacity == 0 || layers[li].mode == MODE_OFF) continue;
 
         LayerEffectiveParams ep;
         applyTimeModulationForLayer(li, ep);
@@ -395,20 +331,22 @@ void LightEngine::render() {
 void LightEngine::applyTimeModulationForLayer(int layerIdx, LayerEffectiveParams& out) const {
     const Layer& layer = layers[layerIdx];
 
-    out.hueAmp        = applyTemporalConfig(layer.hue.ampTemporal,        (float)layer.hue.amplitude);
-    out.hueOffset     = applyTemporalConfig(layer.hue.offsetTemporal,     (float)layer.hue.offset);
-    out.hueWavelength = applyTemporalConfig(layer.hue.wavelengthTemporal, (float)layer.hue.wavelength);
-    out.huePhase      = applyTemporalConfig(layer.hue.phaseShiftTemporal, (float)layer.hue.phaseShift);
+    out.hueAmp        = applyTemporalConfig(layer.hue.ampTemporal);
+    out.hueOffset     = applyTemporalConfig(layer.hue.offsetTemporal);
+    out.hueWavelength = applyTemporalConfig(layer.hue.wavelengthTemporal);
+    out.huePhase      = applyTemporalConfig(layer.hue.phaseShiftTemporal);
 
-    out.satAmp        = applyTemporalConfig(layer.sat.ampTemporal,        (float)layer.sat.amplitude);
-    out.satOffset     = applyTemporalConfig(layer.sat.offsetTemporal,     (float)layer.sat.offset);
-    out.satWavelength = applyTemporalConfig(layer.sat.wavelengthTemporal, (float)layer.sat.wavelength);
-    out.satPhase      = applyTemporalConfig(layer.sat.phaseShiftTemporal, (float)layer.sat.phaseShift);
+    out.satAmp        = applyTemporalConfig(layer.sat.ampTemporal);
+    out.satOffset     = applyTemporalConfig(layer.sat.offsetTemporal);
+    out.satWavelength = applyTemporalConfig(layer.sat.wavelengthTemporal);
+    out.satPhase      = applyTemporalConfig(layer.sat.phaseShiftTemporal);
 
-    out.valAmp        = applyTemporalConfig(layer.val.ampTemporal,        (float)layer.val.amplitude);
-    out.valOffset     = applyTemporalConfig(layer.val.offsetTemporal,     (float)layer.val.offset);
-    out.valWavelength = applyTemporalConfig(layer.val.wavelengthTemporal, (float)layer.val.wavelength);
-    out.valPhase      = applyTemporalConfig(layer.val.phaseShiftTemporal, (float)layer.val.phaseShift);
+    out.valAmp        = applyTemporalConfig(layer.val.ampTemporal);
+    out.valOffset     = applyTemporalConfig(layer.val.offsetTemporal);
+    out.valWavelength = applyTemporalConfig(layer.val.wavelengthTemporal);
+    out.valPhase      = applyTemporalConfig(layer.val.phaseShiftTemporal);
+
+    out.lines         = applyTemporalConfig(layer.linesTemporal);
 }
 
 void LightEngine::renderLayer(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
@@ -427,7 +365,7 @@ void LightEngine::compositeLayersToOutput() {
     memset(leds, 0, numLeds * sizeof(HSVColor));
 
     for (int li = 0; li < MAX_LAYERS; li++) {
-        if (!layers[li].enabled || layers[li].mode == MODE_OFF) continue;
+        if (layers[li].opacity == 0 || layers[li].mode == MODE_OFF) continue;
 
         float alpha = layers[li].opacity / 127.0f;
         if (alpha <= 0.0f) continue;
@@ -436,12 +374,14 @@ void LightEngine::compositeLayersToOutput() {
         const HSVColor* layerBuf = layerBuffers[li];
 
         for (int i = 0; i < numLeds; i++) {
-            float h = leds[i].h * (1.0f - alpha) + layerBuf[i].h * alpha;
-            float s = leds[i].s * (1.0f - alpha) + layerBuf[i].s * alpha;
-            float v = leds[i].v * (1.0f - alpha) + layerBuf[i].v * alpha;
-            leds[i].h = (uint8_t)h;
-            leds[i].s = (uint8_t)s;
-            leds[i].v = (uint8_t)v;
+            if (layerBuf[i].v == 0) continue;  // LED is off in this layer
+            float v_scaled = layerBuf[i].v * alpha;
+            // Opacity scales brightness only; hue is circular and must not be
+            // interpolated toward zero (that would rotate the colour).
+            leds[i].h = layerBuf[i].h;
+            leds[i].s = layerBuf[i].s;
+            float total_v = (float)leds[i].v + v_scaled;
+            leds[i].v = (uint8_t)(total_v > 254.0f ? 254.0f : total_v);
         }
     }
 }
@@ -461,7 +401,7 @@ void LightEngine::setLED(HSVColor* buf, int index, uint8_t h, uint8_t s, uint8_t
 // Evaluate a ColorPanel's spatial waveform at a single LED index.
 // Returns a raw float (effOffset*2 + effAmp*2*waveVal).
 // Callers wrap hue (& 0xFF) or clamp sat/val (0-254) as appropriate.
-float LightEngine::evalPanel(const ColorPanel& panel, int ledIndex,
+float LightEngine::evalPanel(const ColorComponent& panel, int ledIndex,
                               float effAmp, float effOffset,
                               float effWavelength, float effPhase) const {
     if (effWavelength <= 0.0f) {
@@ -493,9 +433,10 @@ float LightEngine::evaluateTemporalWaveform(int profile, float phase, bool direc
     }
 }
 
-// Apply a TemporalConfig to a base value; returns modulated value in 0-127 range.
-float LightEngine::applyTemporalConfig(const TemporalConfig& tc, float baseValue) const {
-    if (!tc.enable) return baseValue;
+// Apply a TemporalConfig to produce a time-varying float in 0-127 range.
+// TC.offset is the static base; TC.amplitude adds oscillation per DAW tempo.
+float LightEngine::applyTemporalConfig(const TemporalConfig& tc) const {
+    if (tc.amplitude == 0) return (float)tc.offset;  // fast path: flat
 
     float framesPerPeriod = (tc.period * 60.0f * FRAME_RATE) / tempoBPM;
     if (framesPerPeriod < 1.0f) framesPerPeriod = 1.0f;
@@ -536,7 +477,8 @@ void LightEngine::renderSolid(int layerIdx, HSVColor* buf, const LayerEffectiveP
 
 void LightEngine::renderMovingDots(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     const Layer& layer = layers[layerIdx];
-    if (layer.lines == 0) return;
+    int lines = (int)ep.lines;
+    if (lines <= 0) return;
 
     // hue.phaseShift (effective) = segment start LED
     // hue.wavelength (effective) = segment length in LEDs
@@ -544,9 +486,9 @@ void LightEngine::renderMovingDots(int layerIdx, HSVColor* buf, const LayerEffec
     int segLen   = (int)ep.hueWavelength;
     if (segLen <= 0) return;
 
-    int lineOff = numLeds / layer.lines;
+    int lineOff = numLeds / lines;
 
-    for (int line = 0; line < layer.lines; line++) {
+    for (int line = 0; line < lines; line++) {
         for (int j = 0; j < segLen; j++) {
             int idx = (startLed + j + line * lineOff) % numLeds;
             uint8_t h = wrapHue (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
@@ -559,15 +501,16 @@ void LightEngine::renderMovingDots(int layerIdx, HSVColor* buf, const LayerEffec
 
 void LightEngine::renderComets(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     const Layer& layer = layers[layerIdx];
-    if (layer.lines == 0) return;
+    int lines = (int)ep.lines;
+    if (lines <= 0) return;
 
     int startLed = (int)ep.huePhase;
     int segLen   = (int)ep.hueWavelength;
     if (segLen <= 0) return;
 
-    int lineOff = numLeds / layer.lines;
+    int lineOff = numLeds / lines;
 
-    for (int line = 0; line < layer.lines; line++) {
+    for (int line = 0; line < lines; line++) {
         for (int j = 0; j < segLen; j++) {
             int idx = (startLed + j + line * lineOff) % numLeds;
             // j=0 is tail (dim), j=segLen-1 is head (full brightness)
@@ -655,22 +598,24 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
 // ============================================================================
 
 // Return pointer to the TemporalConfig for [layerIdx][panelId][paramId].
-// panelId: 0=hue, 1=sat, 2=val
+// panelId: 0=hue, 1=sat, 2=val, 3=mask (linesTemporal, paramId ignored)
 // paramId: 0=ampTemporal, 1=offsetTemporal, 2=wavelengthTemporal, 3=phaseShiftTemporal
 static TemporalConfig* resolveTemporalConfig(Layer* layers, int layerIdx, int panelId, int paramId) {
     if (layerIdx < 0 || layerIdx > 15) return nullptr;
-    if (panelId  < 0 || panelId  >  2) return nullptr;
-    if (paramId  < 0 || paramId  >  3) return nullptr;
+    if (panelId  < 0 || panelId  >  3) return nullptr;
 
-    ColorPanel* panel = (panelId == 0) ? &layers[layerIdx].hue
-                      : (panelId == 1) ? &layers[layerIdx].sat
-                      :                  &layers[layerIdx].val;
+    if (panelId == 3) return &layers[layerIdx].linesTemporal;  // mask panel
 
+    ColorComponent* comp = (panelId == 0) ? &layers[layerIdx].hue
+                         : (panelId == 1) ? &layers[layerIdx].sat
+                         :                  &layers[layerIdx].val;
+
+    if (paramId < 0 || paramId > 3) return nullptr;
     switch (paramId) {
-        case 0: return &panel->ampTemporal;
-        case 1: return &panel->offsetTemporal;
-        case 2: return &panel->wavelengthTemporal;
-        case 3: return &panel->phaseShiftTemporal;
+        case 0: return &comp->ampTemporal;
+        case 1: return &comp->offsetTemporal;
+        case 2: return &comp->wavelengthTemporal;
+        case 3: return &comp->phaseShiftTemporal;
     }
     return nullptr;
 }
@@ -712,8 +657,8 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
 
         case 0x07:  // Full panel TemporalConfig (atomic)
             // [F0, 7D, 07, layerIdx, panelId, paramId,
-            //  profile, amplitude, offset, phaseL, phaseH, period, direction, enable, F7]
-            if (length >= (uint16_t)(offset + 13)) {
+            //  profile, amplitude, offset, phaseL, phaseH, period, direction, F7]
+            if (length >= (uint16_t)(offset + 12)) {
                 TemporalConfig* tc = resolveTemporalConfig(
                     layers,
                     (int)data[offset + 2],
@@ -726,7 +671,6 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
                     tc->phaseShift = (uint16_t)data[offset + 8] | ((uint16_t)data[offset + 9] << 7);
                     tc->period     = (data[offset + 10] > 0) ? data[offset + 10] : 1;
                     tc->direction  = data[offset + 11] != 0;
-                    tc->enable     = data[offset + 12] != 0;
                 }
             }
             break;
@@ -734,7 +678,7 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
         case 0x08:  // Single panel TemporalConfig field
             // [F0, 7D, 08, layerIdx, panelId, paramId, wfField, value, F7]
             // wfField: 0=profile, 1=amplitude, 2=offset, 3=phaseL, 4=phaseH,
-            //          5=period, 6=direction, 7=enable
+            //          5=period, 6=direction
             if (length >= (uint16_t)(offset + 7)) {
                 TemporalConfig* tc = resolveTemporalConfig(
                     layers,
@@ -752,7 +696,6 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
                         case 4: tc->phaseShift = (tc->phaseShift & 0x007F) | ((uint16_t)value << 7); break;
                         case 5: tc->period     = (value > 0) ? value : 1; break;
                         case 6: tc->direction  = (value != 0); break;
-                        case 7: tc->enable     = (value != 0); break;
                     }
                 }
             }
@@ -836,7 +779,7 @@ int lightEngine_getEngineVersion() {
 }
 
 int lightEngine_getParameterCount() {
-    return 19;
+    return 5;
 }
 
 const char* lightEngine_getParameterName(int ccNumber) {
