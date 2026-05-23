@@ -264,14 +264,14 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
     size_t i = 0;
 
     buf[i++] = 0x4C;  // magic
-    buf[i++] = 0x03;  // version
+    buf[i++] = 0x04;  // version (v4: adds motionOffsetTemporal + motionLengthTemporal)
 
     // tempoBPM as uint16 (BPM*10), big-endian
     uint16_t bpmFixed = (uint16_t)(tempoBPM * 10.0f + 0.5f);
     buf[i++] = (uint8_t)(bpmFixed >> 8);
     buf[i++] = (uint8_t)(bpmFixed & 0xFF);
 
-    // 16 layers x 96 bytes each
+    // 16 layers x 110 bytes each
     for (int li = 0; li < MAX_LAYERS; li++) {
         const Layer& layer = layers[li];
         buf[i++] = layer.mode;
@@ -280,14 +280,25 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
         i += serializeComponent(buf + i, layer.sat);
         i += serializeComponent(buf + i, layer.val);
         i += serializeTC(buf + i, layer.linesTemporal);
+        i += serializeTC(buf + i, layer.motionOffsetTemporal);
+        i += serializeTC(buf + i, layer.motionLengthTemporal);
     }
 
     return i;  // == STATE_SIZE
 }
 
 bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
-    if (!buf || len < STATE_SIZE) return false;
-    if (buf[0] != 0x4C || buf[1] != 0x03) return false;
+    static const size_t V3_STATE_SIZE = 1540;
+    static const size_t V4_STATE_SIZE = 1764;
+
+    if (!buf) return false;
+    if (buf[0] != 0x4C) return false;
+
+    const bool isV3 = (buf[1] == 0x03);
+    const bool isV4 = (buf[1] == 0x04);
+    if (!isV3 && !isV4) return false;
+    if (isV3 && len < V3_STATE_SIZE) return false;
+    if (isV4 && len < V4_STATE_SIZE) return false;
 
     size_t i = 2;
 
@@ -303,6 +314,15 @@ bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
         i += deserializeComponent(buf + i, layer.sat);
         i += deserializeComponent(buf + i, layer.val);
         i += deserializeTC(buf + i, layer.linesTemporal);
+
+        if (isV4) {
+            i += deserializeTC(buf + i, layer.motionOffsetTemporal);
+            i += deserializeTC(buf + i, layer.motionLengthTemporal);
+        } else {
+            // v3: no motion TCs — initialise to sensible defaults
+            layer.motionOffsetTemporal = { 0, 0, 0,  0, 16, true };
+            layer.motionLengthTemporal = { 0, 0, 16, 0, 16, true };
+        }
     }
 
     return true;
@@ -347,6 +367,8 @@ void LightEngine::applyTimeModulationForLayer(int layerIdx, LayerEffectiveParams
     out.valPhase      = applyTemporalConfig(layer.val.phaseShiftTemporal);
 
     out.lines         = applyTemporalConfig(layer.linesTemporal);
+    out.motionOffset  = applyTemporalConfig(layer.motionOffsetTemporal);
+    out.motionLength  = applyTemporalConfig(layer.motionLengthTemporal);
 }
 
 void LightEngine::renderLayer(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
@@ -480,10 +502,10 @@ void LightEngine::renderMovingDots(int layerIdx, HSVColor* buf, const LayerEffec
     int lines = (int)ep.lines;
     if (lines <= 0) return;
 
-    // hue.phaseShift (effective) = segment start LED
-    // hue.wavelength (effective) = segment length in LEDs
-    int startLed = (int)ep.huePhase;
-    int segLen   = (int)ep.hueWavelength;
+    // hue.phaseShift (effective) = segment start LED  --> now motionOffsetTemporal
+    // hue.wavelength (effective) = segment length in LEDs --> now motionLengthTemporal
+    int startLed = (int)ep.motionOffset;
+    int segLen   = (int)ep.motionLength;
     if (segLen <= 0) return;
 
     int lineOff = numLeds / lines;
@@ -504,8 +526,8 @@ void LightEngine::renderComets(int layerIdx, HSVColor* buf, const LayerEffective
     int lines = (int)ep.lines;
     if (lines <= 0) return;
 
-    int startLed = (int)ep.huePhase;
-    int segLen   = (int)ep.hueWavelength;
+    int startLed = (int)ep.motionOffset;
+    int segLen   = (int)ep.motionLength;
     if (segLen <= 0) return;
 
     int lineOff = numLeds / lines;
@@ -525,8 +547,8 @@ void LightEngine::renderComets(int layerIdx, HSVColor* buf, const LayerEffective
 
 void LightEngine::renderBackAndForth(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     const Layer& layer = layers[layerIdx];
-    int startLed = (int)ep.huePhase;
-    int segLen   = (int)ep.hueWavelength;
+    int startLed = (int)ep.motionOffset;
+    int segLen   = (int)ep.motionLength;
     if (segLen <= 0) return;
 
     for (int block = 0; block < numLeds; block += 2 * segLen) {
@@ -602,9 +624,11 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
 // paramId: 0=ampTemporal, 1=offsetTemporal, 2=wavelengthTemporal, 3=phaseShiftTemporal
 static TemporalConfig* resolveTemporalConfig(Layer* layers, int layerIdx, int panelId, int paramId) {
     if (layerIdx < 0 || layerIdx > 15) return nullptr;
-    if (panelId  < 0 || panelId  >  3) return nullptr;
+    if (panelId  < 0 || panelId  >  5) return nullptr;
 
-    if (panelId == 3) return &layers[layerIdx].linesTemporal;  // mask panel
+    if (panelId == 3) return &layers[layerIdx].linesTemporal;
+    if (panelId == 4) return &layers[layerIdx].motionOffsetTemporal;
+    if (panelId == 5) return &layers[layerIdx].motionLengthTemporal;
 
     ColorComponent* comp = (panelId == 0) ? &layers[layerIdx].hue
                          : (panelId == 1) ? &layers[layerIdx].sat

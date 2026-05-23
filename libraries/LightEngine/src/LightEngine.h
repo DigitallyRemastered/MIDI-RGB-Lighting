@@ -113,6 +113,8 @@ struct Layer {
     ColorComponent sat;                        // Saturation color component
     ColorComponent val;                        // Value (brightness) color component
     TemporalConfig linesTemporal;              // controls number of parallel lines
+    TemporalConfig motionOffsetTemporal;        // start-LED offset for dots/comets modes
+    TemporalConfig motionLengthTemporal;        // segment length for dots/comets modes
     uint8_t        opacity;                    // 0-127: blend weight (0 = skip rendering)
     CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet mode)
 };
@@ -194,17 +196,19 @@ public:
 
     // Serialized state layout:
     //   [0]    magic   = 0x4C
-    //   [1]    version = 0x03
+    //   [1]    version = 0x04
     //   [2-3]  tempoBPM*10 as uint16, big-endian
-    //   [4..]  16 layers × 96 bytes each:
+    //   [4..]  16 layers × 110 bytes each:
     //            mode(1), opacity(1)                             =   2 bytes
     //            hue ColorComponent: waveshape(1) + 4×7 TC       =  29 bytes
     //            sat ColorComponent: 29 bytes
     //            val ColorComponent: 29 bytes
     //            linesTemporal: 7 bytes
-    //          = 2 + 3×29 + 7 = 96 bytes per layer
-    //   Total: 4 + 16×96 = 1540 bytes
-    static const size_t STATE_SIZE = 1540;
+    //            motionOffsetTemporal: 7 bytes
+    //            motionLengthTemporal: 7 bytes
+    //          = 2 + 3×29 + 7 + 7 + 7 = 110 bytes per layer
+    //   Total: 4 + 16×110 = 1764 bytes
+    static const size_t STATE_SIZE = 1764;
 
     size_t serializeState  (uint8_t* buf, size_t bufLen) const;
     bool   deserializeState(const uint8_t* buf, size_t len);
@@ -263,6 +267,8 @@ private:
         float satAmp, satOffset, satWavelength, satPhase;
         float valAmp, valOffset, valWavelength, valPhase;
         float lines;
+        float motionOffset;  // start-LED for dots/comets modes
+        float motionLength;  // segment length for dots/comets modes
     };
 
     // ========================================================================
