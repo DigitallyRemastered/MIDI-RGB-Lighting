@@ -397,13 +397,9 @@ void LightEngine::compositeLayersToOutput() {
 
         for (int i = 0; i < numLeds; i++) {
             if (layerBuf[i].v == 0) continue;  // LED is off in this layer
-            float v_scaled = layerBuf[i].v * alpha;
-            // Opacity scales brightness only; hue is circular and must not be
-            // interpolated toward zero (that would rotate the colour).
-            leds[i].h = layerBuf[i].h;
-            leds[i].s = layerBuf[i].s;
-            float total_v = (float)leds[i].v + v_scaled;
-            leds[i].v = (uint8_t)(total_v > 254.0f ? 254.0f : total_v);
+            leds[i].h = (uint8_t)(layerBuf[i].h * alpha + leds[i].h * (1.0f - alpha));
+            leds[i].s = (uint8_t)(layerBuf[i].s * alpha + leds[i].s * (1.0f - alpha));
+            leds[i].v = (uint8_t)(layerBuf[i].v * alpha + leds[i].v * (1.0f - alpha));
         }
     }
 }
