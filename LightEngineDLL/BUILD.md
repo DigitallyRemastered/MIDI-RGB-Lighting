@@ -30,7 +30,7 @@ sudo dnf install cmake gcc-c++
 ### Quick Build (Windows PowerShell)
 
 ```powershell
-cd "c:\Users\sandm\OneDrive\Documents\Light Studio\LightEngineDLL"
+cd "d:\Code\Lights\MIDI-RGB-Lighting\LightEngineDLL"
 
 # Configure (generates Visual Studio solution)
 cmake -B build
@@ -38,7 +38,7 @@ cmake -B build
 # Build (compiles DLL)
 cmake --build build --config Release
 
-# Output: ../DRLightStudio/Light Studio/Resources/LightEngine.dll
+# Output: ../Release/LightEngine.dll  (committed to MIDI-RGB-Lighting repo)
 ```
 
 ### Quick Build (macOS/Linux)
@@ -167,8 +167,10 @@ After successful build:
 
 1. **Verify output location**:
    ```
-   DRLightStudio/Light Studio/Resources/LightEngine.dll
+   MIDI-RGB-Lighting/Release/LightEngine.dll
    ```
+   The DLL is committed to this repo. DRLightStudio picks it up at
+   `Resources/MIDI-RGB-Lighting/Release/LightEngine.dll` after a submodule update.
 
 2. **JUCE plugin will load DLL at runtime**:
    - Uses `juce::DynamicLibrary` class

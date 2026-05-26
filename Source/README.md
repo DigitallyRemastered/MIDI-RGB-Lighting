@@ -6,10 +6,6 @@ This folder contains two versions of the Arduino firmware that share the same re
 
 ```
 Source/
-├── LightEngine/           # Shared rendering engine (DO NOT DUPLICATE)
-│   ├── LightEngine.h
-│   └── LightEngine.cpp
-│
 ├── lights_teensy/         # Teensy USB-MIDI version
 │   └── lights_teensy.ino
 │
@@ -17,10 +13,12 @@ Source/
     └── lights_esp32.ino
 ```
 
+The shared rendering engine lives in `../libraries/LightEngine/` and is symlinked into Arduino's libraries folder by `setup_library.ps1`.
+
 ## Versions
 
 ### Teensy USB-MIDI (`lights_teensy/`)
-- **Hardware**: Teensy board (3.2, 4.0, etc.)
+- **Hardware**: Teensy 3.6 (also compatible with 3.2, 4.0, 4.1)
 - **Connection**: USB-MIDI (plug and play)
 - **LEDs**: GPIO pin 0
 - **Best for**: Wired USB connection, lowest latency

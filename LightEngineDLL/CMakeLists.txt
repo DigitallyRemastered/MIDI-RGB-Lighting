@@ -5,9 +5,16 @@ project(LightEngine VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Output directory (place DLL where JUCE plugin can find it)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../DRLightStudio/Light\ Studio/Resources)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../DRLightStudio/Light\ Studio/Resources)
+# Output directory — place DLL in MIDI-RGB-Lighting/Release/ so it is committed to
+# this repo and picked up by DRLightStudio when it updates its submodule pointer.
+# Plugin loads from: Resources/MIDI-RGB-Lighting/Release/LightEngine.dll
+#
+# Use per-config variables to prevent Visual Studio (multi-config generator) from
+# appending the config name (e.g. Release/Release/ or Release/Debug/).
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/../Release)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_SOURCE_DIR}/../Release)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/../Release)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_SOURCE_DIR}/../Release)
 
 # Platform-specific settings
 if(WIN32)

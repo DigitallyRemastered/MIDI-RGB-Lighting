@@ -1,8 +1,8 @@
 # Light Engine DLL - Implementation Status
 
-**Last Updated**: Initial Implementation Complete  
-**Version**: 1.0.0-alpha  
-**Status**: Ready for Build & Testing
+**Last Updated**: May 25, 2026  
+**Version**: 1.0.0  
+**Status**: Code complete — rebuild required after output path change
 
 ---
 
@@ -85,235 +85,127 @@ All 15 MIDI parameters mapped:
 
 ## 🔨 Remaining Work
 
-### Phase 1: Build & Validate DLL ⏳
-- [ ] Install CMake (if not already installed)
-- [ ] Run `cmake -B build` (generate build files)
-- [ ] Run `cmake --build build --config Release` (compile DLL)
-- [ ] Verify DLL exports with `dumpbin` (Windows) or `nm` (macOS/Linux)
-- [ ] Test manual DLL load in standalone C++ app
+### Step 1: Rebuild DLL to new output path ⏳
+The CMake output path was changed from `../DRLightStudio/Light Studio/Resources/` to
+`../Release/` so the DLL is committed inside this repo and picked up via submodule update.
 
-**Estimated Time**: 30 minutes (first-time setup)
+```powershell
+cd "d:\Code\Lights\MIDI-RGB-Lighting\LightEngineDLL"
 
-### Phase 2: JUCE Plugin Loader (Not Started)
-Create `LightEngineLoader.h` in JUCE plugin:
-```cpp
-class LightEngineLoader {
-    juce::DynamicLibrary dll;
-    
-    // Function pointers
-    GetParameterCountFunc getParameterCount;
-    RenderForegroundFunc renderForeground;
-    // ... (load all API functions)
-    
-public:
-    bool loadFromFile(juce::File dllPath);
-    void unload();
-    bool isLoaded();
-    
-    // Wrapper methods
-    int getNumParameters();
-    void render(int modeId, HSV* leds, int count, const RenderContext& ctx);
-};
+# Re-generate build files (picks up new output path)
+cmake -B build
+
+# Compile Release DLL
+cmake --build build --config Release
+
+# Verify output location
+ls ..\Release\LightEngine.dll
 ```
 
-**Estimated Time**: 2-3 hours
+Expected output: `MIDI-RGB-Lighting/Release/LightEngine.dll`
 
-### Phase 3: Preview Component (Not Started)
-Create `LightPreviewComponent.h` in JUCE plugin:
-```cpp
-class LightPreviewComponent : public juce::Component, 
-                              private juce::Timer {
-    LightEngineLoader& engine;
-    HSV leds[108];
-    HSV background[108];
-    
-    void timerCallback() override;  // 30 FPS updates
-    void paint(juce::Graphics& g) override;  // Draw LEDs as rectangles
-    
-    juce::Colour hsvToRgb(const HSV& hsv);  // HSV→RGB conversion
-};
+### Step 2: Commit DLL to MIDI-RGB-Lighting repo
+```powershell
+cd "d:\Code\Lights\MIDI-RGB-Lighting"
+git add Release/LightEngine.dll
+git commit -m "build: Release LightEngine.dll v1.0.0"
+git push
 ```
 
-**Features**:
-- Horizontal LED strip visualization (108 colored rectangles)
-- Real-time updates from plugin parameters
-- Background + foreground layering preview
-- HSV→RGB conversion for display
+### Step 3: Update DRLightStudio submodule pointer
+```powershell
+cd "d:\Code\Lights\DRLightStudio\Light Studio\Resources\MIDI-RGB-Lighting"
+git pull origin main
 
-**Estimated Time**: 3-4 hours
+cd "d:\Code\Lights\DRLightStudio"
+git add "Light Studio/Resources/MIDI-RGB-Lighting"
+git commit -m "submodule: update MIDI-RGB-Lighting to include LightEngine.dll"
+```
 
-### Phase 4: Plugin Integration (Not Started)
-Modify `PluginEditor.cpp`:
-- [ ] Add `LightEngineLoader engine;` member
-- [ ] Load DLL on editor construction
-- [ ] Add `LightPreviewComponent preview;` to UI layout
-- [ ] Connect parameter changes to preview updates
-- [ ] Handle DLL reload on file change (hot-swap)
+The JUCE plugin's `LightEngineLoader` will then find the DLL at:
+`Contents/Resources/MIDI-RGB-Lighting/Release/LightEngine.dll`
 
-**Estimated Time**: 2-3 hours
-
-### Phase 5: Testing & Refinement (Not Started)
-- [ ] Visual comparison: Plugin preview vs. Teensy hardware output
-- [ ] Test all 10 foreground modes
+### Step 4: Hardware validation
+- [ ] Load plugin in FL Studio, verify DLL loads automatically (check plugin log)
+- [ ] Test all 10 foreground modes on physical LED strip
 - [ ] Test all 3 background modes
-- [ ] Verify layering (background + foreground)
-- [ ] Test parameter changes in FL Studio
-- [ ] Test MIDI note triggers (Notes to Drives, Move startLED)
-- [ ] Performance profiling (ensure < 100μs render time @ 30 FPS)
-- [ ] Cross-platform testing (Windows/macOS if applicable)
-
-**Estimated Time**: 4-6 hours
+- [ ] Test layering (foreground + background simultaneously)
+- [ ] Test MIDI note triggers (Mode 0: Notes to Drives, Mode 5: Move startLED)
+- [ ] Verify 30 FPS render rate (no visible stutter)
 
 ---
 
 ## 📊 Overall Progress
 
-| Component | Status | Confidence |
-|-----------|--------|-----------|
-| API Design | ✅ Complete | 100% |
-| DLL Structure | ✅ Complete | 100% |
-| Mode Implementations | ✅ Complete | 95% (needs hardware testing) |
-| Build System | ✅ Complete | 100% |
-| Documentation | ✅ Complete | 100% |
-| **DLL Compilation** | ⏳ Pending | N/A (CMake not installed) |
-| Plugin Loader | ⬜ Not Started | N/A |
-| Preview UI | ⬜ Not Started | N/A |
-| Integration | ⬜ Not Started | N/A |
-| Testing | ⬜ Not Started | N/A |
+| Component | Status |
+|-----------|--------|
+| API Design | ✅ Complete |
+| DLL Structure | ✅ Complete |
+| Mode Implementations (13/13) | ✅ Complete |
+| Build System (CMakeLists.txt) | ✅ Complete |
+| Documentation | ✅ Complete |
+| Plugin Loader (`LightEngineLoader.*`) | ✅ Complete (in DRLightStudio) |
+| Preview UI (`LEDPreviewPanel`) | ✅ Complete (in DRLightStudio) |
+| DLL Output Path (→ `Release/`) | ✅ Updated |
+| **DLL Rebuild & Commit** | ⏳ Pending |
+| **Submodule Update in DRLightStudio** | ⏳ Pending |
+| **Hardware Validation** | ⏳ Pending |
 
-**Total Progress**: ~50% (foundation complete, integration pending)
+**Total Progress**: ~90% (all code complete; build/deploy/validate remaining)
 
 ---
 
 ## 🎯 Next Immediate Steps
 
-### For User (Required First):
-1. **Install CMake**: https://cmake.org/download/
-   - Windows: Select "Add to PATH" during installation
-   - macOS: `brew install cmake`
-   - Linux: `sudo apt install cmake`
-
-2. **Test Build**:
-   ```powershell
-   cd "c:\Users\sandm\OneDrive\Documents\Light Studio\LightEngineDLL"
-   cmake -B build
-   cmake --build build --config Release
-   ```
-
-3. **Verify Output**:
-   - Check for `LightEngine.dll` in `../DRLightStudio/Light Studio/Resources/`
-   - If errors occur, see [BUILD.md](BUILD.md) troubleshooting section
-
-### For Implementation (After Successful Build):
-1. Create stub `LightEngineLoader.h` in JUCE plugin
-2. Test loading DLL and calling `getParameterCount()`
-3. Implement `LightPreviewComponent` basic rendering
-4. Connect to plugin parameter values
-5. Visual validation with hardware
+1. **Rebuild** — run the commands in Step 1 above (output path changed)
+2. **Commit DLL** — `git add Release/LightEngine.dll && git commit`
+3. **Update submodule** in DRLightStudio to pull the new commit
+4. **Load plugin** in FL Studio and verify the loader log shows success
+5. **Hardware test** — run through all 13 modes on the physical strip
 
 ---
 
 ## 🔍 Validation Checklist
 
-Before proceeding to JUCE integration:
-
 - [x] All 13 mode rendering functions implemented
 - [x] All 15 parameters defined in metadata
-- [x] Constants extracted from lights.ino
+- [x] Constants extracted from LightEngine source
 - [x] API dispatcher implemented
-- [x] CSV export function implemented
-- [x] CMakeLists.txt configured
-- [x] Cross-platform compatibility designed
-- [ ] DLL compiles without errors (requires CMake installation)
-- [ ] DLL exports verified (requires compilation)
-- [ ] Manual load test successful (requires compilation)
+- [x] CMakeLists.txt configured (output → `../Release/`)
+- [x] Cross-platform build support (Windows/macOS/Linux)
+- [x] JUCE plugin loader (`LightEngineLoader.*`) complete
+- [x] LED preview UI (`LEDPreviewPanel`) complete
+- [ ] DLL rebuilt to new output path
+- [ ] DLL committed to MIDI-RGB-Lighting repo
+- [ ] Submodule updated in DRLightStudio
+- [ ] DLL loads successfully in plugin (verify loader log)
+- [ ] All modes validated on hardware
 
 ---
 
 ## 📝 Known Limitations & Notes
 
 ### Stateful Modes
-**Mode 5 (Move startLED)**: Modifies `ffLedStart` via MIDI notes in lights.ino
-- **DLL Limitation**: DLL is stateless (renders current parameter values only)
-- **Solution**: JUCE plugin handles MIDI note events to increment `ffLedStart` parameter
-- **Implementation**: Plugin listens for MIDI notes 53-55, updates parameter[3] accordingly
+**Mode 5 (Move startLED)**: MIDI notes shift `ffLedStart` in the firmware.
+- **DLL is stateless** — the JUCE plugin handles note events and updates `params[3]` directly.
 
 ### Random Number Generation
-**Mode 7 (Flash Lights)**: Uses `random()` in lights.ino
-- **DLL Enhancement**: Uses deterministic `srand(ctx->randomSeed)` for reproducible frames
-- **Plugin Responsibility**: Provide random seed (e.g., frame counter or time-based)
+**Mode 7 (Flash Lights)**: Uses a deterministic `srand(ctx->randomSeed)` instead of Arduino `random()`.
+- The plugin supplies a random seed (e.g., frame counter) for reproducible frames.
 
-### Performance Assumptions
-- Target: 30 FPS (33ms per frame)
-- Render budget: < 100μs per frame for 108 LEDs
-- Background + foreground: < 200μs total
-- **Profiling**: Add timing measurements after initial integration
-
-### Sync Markers
-Each mode has `// ===== BEGIN/END =====` comments marking original lights.ino location:
-```cpp
-// ===== BEGIN: Rainbow Wheel (sync with lights.ino case 1) =====
-void renderRainbowWheel(...) { ... }
-// ===== END: Rainbow Wheel =====
-```
-**Purpose**: Easily locate source code for validation or updates
+### Performance Target
+- 30 FPS (33 ms/frame); render budget < 200 µs for foreground + background at 108 LEDs.
 
 ---
 
-## 🚀 Post-Integration Roadmap
+## 🚀 Post-Validation Roadmap
 
-### Future Enhancements (Post-MVP)
-1. **Auto-Generation**: Generate mode .cpp files from lights.ino structured comments
-2. **Version Checking**: Add checksum validation to detect lights.ino/DLL drift
-3. **Live Coding**: Hot-reload DLL on file change without restarting plugin
-4. **User Modes**: Allow users to add custom light modes via DLL drop-in
-5. **Hardware Sync**: USB/Serial communication from plugin to Teensy for live upload
-6. **Mode Editor**: Visual mode designer in plugin UI (graph-based parameter flow)
-7. **Preset System**: Save/load parameter snapshots for each mode
-8. **Animation Timeline**: Record parameter automation as reusable animations
-
-### Community Features
-- Share light modes as standalone DLLs
-- Mode marketplace/repository
-- Template.csv auto-sync with FL Studio project
+1. **Version checking** — detect drift between firmware and DLL via checksum
+2. **Hot-reload** — reload DLL on file change without restarting the DAW
+3. **User modes** — allow custom light modes via DLL drop-in
+4. **Hardware sync** — upload firmware changes from plugin UI
 
 ---
 
-## 📞 Support & Debugging
+**Status Summary**: All code is implemented. The only remaining work is a rebuild (output path changed), committing the DLL, and hardware validation.
 
-**If DLL fails to build:**
-1. Check [BUILD.md](BUILD.md) troubleshooting section
-2. Verify CMake version: `cmake --version` (should be ≥3.15)
-3. Check compiler installation (Visual Studio/GCC/Clang)
-4. Review error messages for missing dependencies
-
-**If DLL compiles but crashes:**
-1. Use Debug build: `cmake -B build -DCMAKE_BUILD_TYPE=Debug`
-2. Attach debugger to plugin process
-3. Check for null pointers in `RenderContext`
-4. Verify `numLeds == 108` assumption
-
-**If mode output differs from Arduino:**
-1. Compare parameter scaling (ensure 0-127 → 0-254 for HSV)
-2. Verify lookup table values match lights.ino exactly
-3. Check `NUM_LEDS` vs `numLeds` parameter consistency
-4. Add logging to both Arduino and DLL for side-by-side comparison
-
----
-
-## 📄 License & Attribution
-
-**Code License**: [Specify license, e.g., MIT/GPL/proprietary]
-
-**Dependencies**:
-- JUCE Framework: GPL3/Commercial (for plugin loader)
-- CMake: BSD 3-Clause (build system only)
-- FastLED compatibility: Algorithm reference only, clean-room implementation
-
-**Original Source**:
-- All mode algorithms extracted from `lights.ino` (Teensy 3.6 firmware)
-- Structured comment metadata preserved from Arduino source
-
----
-
-**Status Summary**: DLL implementation is **architecturally complete** and ready for compilation. All 13 modes have been extracted, metadata is defined, and build system is configured. Next milestone is installing CMake and compiling the DLL to validate the implementation.

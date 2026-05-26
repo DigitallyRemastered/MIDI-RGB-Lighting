@@ -39,8 +39,8 @@ ln -s "$(pwd)/libraries/LightEngine" ~/Documents/Arduino/libraries/LightEngine
 ## Step 3: Open Your Sketch
 
 ### For Teensy (USB-MIDI):
-- Open `Source/lights/lights.ino`
-- Select **Tools → Board → Teensy X.X**
+- Open `Source/lights_teensy/lights_teensy.ino`
+- Select **Tools → Board → Teensy 3.6** (or your Teensy model)
 - Select **Tools → USB Type → MIDI**
 - Upload
 
@@ -80,13 +80,15 @@ In Arduino IDE:
 
 ### 3. Configure the Sketch
 
-Open `Source/lights_esp32/lights_esp32.ino` and update lines 17–18 with your WiFi credentials:
+Open `Source/lights_esp32/lights_esp32.ino` and update the WiFi credentials near the top:
 ```cpp
 const char* ssid = "YourNetworkName";
 const char* password = "YourPassword";
 ```
 
-Also update `NUM_LEDS` (line 20) to match your LED strip length, and `DATA_PIN` (line 21) to the GPIO pin your strip's data line is connected to.
+Also set `NUM_LEDS` to your strip length and `DATA_PIN` to the GPIO pin connected to the strip's data line.
+
+> **BLE-MIDI alternative**: The ESP32 sketch also supports BLE-MIDI (Bluetooth Low Energy). If your DAW supports BLE-MIDI you can skip the WiFi/rtpMIDI steps entirely and connect wirelessly without a network.
 
 ### 4. Upload
 

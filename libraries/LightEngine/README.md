@@ -22,7 +22,7 @@ This library is designed to be symlinked from your project repo to Arduino's lib
 **Run the setup script from the repo root:**
 
 ```powershell
-# Windows (as Administrator)
+# Windows (as Administrator) — from d:\Code\Lights\MIDI-RGB-Lighting\
 .\setup_library.ps1
 ```
 

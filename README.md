@@ -1,17 +1,25 @@
 # MIDI-RGB-Lighting
-Control individually addressable LEDs using the FastLED library and USB MIDI using the Teensy 3.6
+Control individually addressable LEDs using the FastLED library and MIDI. Supports **Teensy** (USB-MIDI) and **ESP32** (WiFi/BLE-MIDI).
 
 See a demo and video of construction here: https://www.youtube.com/watch?v=1hBeVJ6QlaU
 
-## Requirements: 
+## Requirements
 
-Requires a Teensy device. I am using a Teensy 3.6. I programmed it via Teensyduino configuring as a USBMIDI device:
+### Hardware
+
+Choose one of two controller options:
+
+| Option | Hardware | Connection |
+|---|---|---|
+| **Teensy** (recommended) | Teensy 3.6 (or 3.2/4.x) | USB-MIDI (plug and play) |
+| **ESP32** | Seeed XIAO ESP32S3 (or any ESP32) | WiFi (rtpMIDI) or BLE-MIDI |
+
+The Teensy is configured as a USB-MIDI device via Teensyduino:
 ![image](https://github.com/DigitallyRemastered/MIDI-RGB-Lighting/blob/main/images/Teensy%20USB%20MIDI.png)
 
-The PSU must be rated for power required by your LED strips. Each LED with each color at full brightness (white) can be estimated to draw 50mA. 108 
-LEDs as I have programmed has a current draw of 108 lights * 0.05 Amps/light = 5.4A. 5V * 5.4A = 27W minimum for the power supply you shoudl buy. You should get a PSU that can output a good margin more power than is required (although it will only supply as much power as is demanded from the lights).
+The PSU must be rated for the power required by your LED strips. Each LED at full white brightness draws ~50 mA. For 108 LEDs: 108 × 0.05 A = 5.4 A → use a 5 V supply rated for at least 27 W with headroom.
 
-You will require an Digital Audio Workstation to send MIDI control messages. To use the included template/example, you will need FL Studio (I'm using version 20)
+A Digital Audio Workstation is required to send MIDI CC messages. The included template targets FL Studio.
 
 ## Quick Start: 
 
@@ -54,7 +62,7 @@ These variables generally control these aspects of the LEDs:
     ffBright    |       3        | foreground layer brightness
     ffLedStart  |       4        | foreground layer start position of LED
     ffLedLength |       5        | foreground layer length of a line of LEDs
-    ffMode      |       6        | foreground layer mode (0-8)
+    ffMode      |       6        | foreground layer mode (0-9)
 
       // 0: notes2MIDIChannel
       // 1: rainbow wheel
@@ -93,69 +101,19 @@ These variables generally control these aspects of the LEDs:
 
 ## Extending the Light System
 
-The code uses structured comments to define MIDI parameters and modes. The `generate_csv.py` script automatically parses these comments to create `Template.csv` for FL Studio.
+All rendering logic lives in the shared `LightEngine` library (`libraries/LightEngine/src/`). Changes there apply to both the Teensy and ESP32 firmware as well as the Windows DLL used by the Light Studio VST3 plugin.
 
 ### Adding a New Parameter
 
-1. Add a metadata block in `lights.ino` before the variable declaration:
-```cpp
-/**
- * @param MyParameter
- * @cc 16
- * @layer Foreground
- * @tooltip Description of what this parameter does
- */
-int myVar = 0;
-```
-
-2. Add a case to the `OnControlChange` switch statement:
-```cpp
-case 16: myVar = value; break;
-```
-
-3. Use the variable in one or more mode implementations
-
-4. Regenerate the CSV: `python generate_csv.py`
+1. Declare the parameter in `LightEngine.h` and add it to the `RenderContext` struct.
+2. Handle the new CC number in `LightEngine.cpp` → `handleControlChange()`.
+3. Use the parameter in one or more mode render functions.
+4. Update the FL Studio MIDI Out channel to include the new CC (right-click a knob in the channel → **Create automation clip**, or wire it to a new controller).
 
 ### Adding a New Mode
 
-1. Add the mode name to the appropriate mode selector's `@modes` list:
-```cpp
-/**
- * @param Foreground
- * @cc 6
- * @modes 0:Notes to Drives,...,10:MyNewMode
- */
-```
-
-2. Implement the mode logic in the appropriate switch statement with a mode annotation:
-```cpp
-case 10: // @mode MyNewMode @uses ffHue,ffSat,ffBright,myVar
-  // Your mode logic here
-  break;
-```
-
-3. Regenerate the CSV: `python generate_csv.py`
-
-### Structured Comment Tags
-
-- `@param DisplayName` - Name shown in FL Studio
-- `@cc N` - MIDI Control Change number (1-15, or higher if MIDI allows)
-- `@layer Foreground|Background|Shared` - Which layer uses this parameter (omit for mode selectors)
-- `@tooltip Description` - Help text for the parameter
-- `@modes N:ModeName,M:OtherMode` - For mode selectors only, lists available modes
-- `@mode ModeName @uses var1,var2` - Annotates a case statement with mode info
-
-### Validation
-
-Run validation to check for errors before regenerating:
-```bash
-python generate_csv.py --validate
-```
-
-This will:
-- Check all CCs 1-15 have definitions
-- Verify no duplicate CC numbers
-- Ensure all modes in `@modes` are implemented
-- Compare generated CSV with existing to detect changes
+1. Add an entry to the `LayerMode` enum in `LightEngine.h`.
+2. Implement the render logic as a new `case` in the foreground or background switch in `LightEngine.cpp`.
+3. Add the mode name to the metadata table in `LightEngine.cpp` (or `Metadata.cpp` if building the Windows DLL).
+4. Rebuild and re-flash the firmware (`lights_teensy.ino` or `lights_esp32.ino`).
 
