@@ -96,9 +96,8 @@ enum LayerMode {
     MODE_SOLID         = 1,  // Pure panel evaluation — no procedural motion
     MODE_MOVING_DOTS   = 2,  // Moving line segments
     MODE_COMETS        = 3,  // Comet trails with brightness fade
-    MODE_BACK_FORTH    = 4,  // Oscillating blocks back and forth
-    MODE_FLASH         = 5,  // Random single-LED flash each frame
-    MODE_GRAVITY_COMET = 6   // Note-triggered comet under gravity physics
+    MODE_FLASH         = 4,  // Random single-LED flash each frame
+    MODE_GRAVITY_COMET = 5   // Note-triggered comet under gravity physics
 };
 
 // ============================================================================
@@ -282,7 +281,6 @@ private:
     void renderSolid       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderMovingDots  (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderComets      (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
-    void renderBackAndForth(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderFlash       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderGravityComet(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
 

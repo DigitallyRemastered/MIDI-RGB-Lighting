@@ -31,7 +31,7 @@ const int LightEngine::COLOR_PHASE[64] = {
 // ============================================================================
 
 static const ParameterInfo PARAMETER_TABLE[] = {
-    { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=BackForth,5=Flash,6=GravityComet)"},
+    { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash,5=GravityComet)"},
     { 2, "Opacity",        "Layer blend weight (0=transparent/skip, 127=opaque)"},
     { 3, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
     { 4, "Sat Waveshape",  "Spatial waveshape for saturation"},
@@ -43,9 +43,8 @@ static const ModeInfo MODE_TABLE[] = {
     {1, "Solid"},
     {2, "Moving Dots"},
     {3, "Comets"},
-    {4, "Back and Forth"},
-    {5, "Flash"},
-    {6, "Gravity Comet"}
+    {4, "Flash"},
+    {5, "Gravity Comet"}
 };
 
 const ParameterInfo* getParameterInfo(int ccNumber) {
@@ -59,13 +58,17 @@ int getAllParameters(const ParameterInfo** outArray) {
 }
 
 int getModeCount() {
-    return 7;
+    return 6;
 }
 
 const ModeInfo* getModeInfo(int modeId) {
-    if (modeId < 0 || modeId >= 7) return nullptr;
+    if (modeId < 0 || modeId >= 6) return nullptr;
     return &MODE_TABLE[modeId];
 }
+
+// Local helpers used across compositing/render passes.
+static inline uint8_t clampSV(float v);
+static inline uint8_t wrapHue(float h);
 
 // ============================================================================
 // Constructor / Destructor
@@ -146,7 +149,7 @@ void LightEngine::handleControlChange(uint8_t channel, uint8_t control, uint8_t 
     // CC 5 = Val Waveshape  (0-3)
     // All spatial amp/offset/wl/phase are set via SysEx TemporalConfig messages.
     switch (control) {
-        case 1:  layer.mode              = value % 7;    break;
+        case 1:  layer.mode              = value % 6;    break;
         case 2:  layer.opacity           = value;        break;
         case 3:  layer.hue.waveshape     = value & 0x03; break;
         case 4:  layer.sat.waveshape     = value & 0x03; break;
@@ -376,7 +379,6 @@ void LightEngine::renderLayer(int layerIdx, HSVColor* buf, const LayerEffectiveP
         case MODE_SOLID:         renderSolid       (layerIdx, buf, ep); break;
         case MODE_MOVING_DOTS:   renderMovingDots  (layerIdx, buf, ep); break;
         case MODE_COMETS:        renderComets      (layerIdx, buf, ep); break;
-        case MODE_BACK_FORTH:    renderBackAndForth(layerIdx, buf, ep); break;
         case MODE_FLASH:         renderFlash       (layerIdx, buf, ep); break;
         case MODE_GRAVITY_COMET: renderGravityComet(layerIdx, buf, ep); break;
         default: break;
@@ -397,9 +399,9 @@ void LightEngine::compositeLayersToOutput() {
 
         for (int i = 0; i < numLeds; i++) {
             if (layerBuf[i].v == 0) continue;  // LED is off in this layer
-            leds[i].h = (uint8_t)(layerBuf[i].h * alpha + leds[i].h * (1.0f - alpha));
-            leds[i].s = (uint8_t)(layerBuf[i].s * alpha + leds[i].s * (1.0f - alpha));
-            leds[i].v = (uint8_t)(layerBuf[i].v * alpha + leds[i].v * (1.0f - alpha));
+            leds[i].h = (uint8_t)wrapHue ((layerBuf[i].h * alpha + leds[i].h * (1.0f - alpha)));
+            leds[i].s = (uint8_t)clampSV ((layerBuf[i].s * alpha + leds[i].s * (1.0f - alpha)));
+            leds[i].v = (uint8_t)clampSV ((layerBuf[i].v * alpha + leds[i].v * (1.0f - alpha)));
         }
     }
 }
@@ -536,23 +538,6 @@ void LightEngine::renderComets(int layerIdx, HSVColor* buf, const LayerEffective
             uint8_t h = wrapHue (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
             uint8_t s = clampSV (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
             uint8_t v = clampSV (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * trailFactor);
-            setLED(buf, idx, h, s, v);
-        }
-    }
-}
-
-void LightEngine::renderBackAndForth(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
-    const Layer& layer = layers[layerIdx];
-    int startLed = (int)ep.motionOffset;
-    int segLen   = (int)ep.motionLength;
-    if (segLen <= 0) return;
-
-    for (int block = 0; block < numLeds; block += 2 * segLen) {
-        for (int j = 0; j < segLen; j++) {
-            int idx = (startLed * segLen + block + j) % numLeds;
-            uint8_t h = wrapHue (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-            uint8_t s = clampSV (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-            uint8_t v = clampSV (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
             setLED(buf, idx, h, s, v);
         }
     }
