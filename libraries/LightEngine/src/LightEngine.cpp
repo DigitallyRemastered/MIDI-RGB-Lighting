@@ -32,7 +32,7 @@ const int LightEngine::COLOR_PHASE[64] = {
 
 static const ParameterInfo PARAMETER_TABLE[] = {
     { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash,5=GravityComet)"},
-    { 2, "Opacity",        "Layer blend weight (0=transparent/skip, 127=opaque)"},
+    { 2, "Opacity",        "Layer blend weight base (temporal; 0=transparent, 127=opaque)"},
     { 3, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
     { 4, "Sat Waveshape",  "Spatial waveshape for saturation"},
     { 5, "Val Waveshape",  "Spatial waveshape for brightness"}
@@ -97,15 +97,15 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
         layerBuffers[li] = new HSVColor[numLeds];
     }
 
-    // All layers start with opacity=0 (invisible) and MODE_OFF
+    // All layers start MODE_OFF with opacity temporal offset=0 (fully transparent)
     for (int li = 0; li < MAX_LAYERS; li++) {
         Layer& layer = layers[li];
-        layer.mode    = MODE_OFF;
-        layer.opacity = 0;
+        layer.mode = MODE_OFF;
         initColorComponent(layer.hue, 0,   127);  // hue:  offset=0,   wl=127
         initColorComponent(layer.sat, 127, 127);  // sat:  offset=127 (full), wl=127
         initColorComponent(layer.val, 64,  127);  // val:  offset=64  (half), wl=127
         initTemporalConfig(layer.linesTemporal);  layer.linesTemporal.offset = 1;  // 1 line
+        initTemporalConfig(layer.opacityTemporal); layer.opacityTemporal.offset = 0;
         for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
             layer.comets[ci].active   = false;
             layer.comets[ci].position = 0.0f;
@@ -118,6 +118,7 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     frameCounter        = 0;
     tempoBPM            = 120.0f;
     _saveStateRequested = false;
+    memset(effectiveOpacity, 0, sizeof(effectiveOpacity));
 
     memset(leds, 0, numLeds * sizeof(HSVColor));
     for (int li = 0; li < MAX_LAYERS; li++) {
@@ -143,14 +144,14 @@ void LightEngine::handleControlChange(uint8_t channel, uint8_t control, uint8_t 
     Layer& layer = layers[li];
 
     // CC 1 = Mode
-    // CC 2 = Opacity (0=transparent/skip, 127=opaque)
+    // CC 2 = Opacity base offset (0=transparent, 127=opaque)
     // CC 3 = Hue Waveshape  (0-3)
     // CC 4 = Sat Waveshape  (0-3)
     // CC 5 = Val Waveshape  (0-3)
     // All spatial amp/offset/wl/phase are set via SysEx TemporalConfig messages.
     switch (control) {
         case 1:  layer.mode              = value % 6;    break;
-        case 2:  layer.opacity           = value;        break;
+        case 2:  layer.opacityTemporal.offset = value;   break;
         case 3:  layer.hue.waveshape     = value & 0x03; break;
         case 4:  layer.sat.waveshape     = value & 0x03; break;
         case 5:  layer.val.waveshape     = value & 0x03; break;
@@ -203,7 +204,7 @@ int LightEngine::getLayerCC(int layer, int cc) const {
 
     switch (cc) {
         case 1: return l.mode;
-        case 2: return l.opacity;
+        case 2: return l.opacityTemporal.offset;
         case 3: return l.hue.waveshape;
         case 4: return l.sat.waveshape;
         case 5: return l.val.waveshape;
@@ -267,18 +268,18 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
     size_t i = 0;
 
     buf[i++] = 0x4C;  // magic
-    buf[i++] = 0x04;  // version (v4: adds motionOffsetTemporal + motionLengthTemporal)
+    buf[i++] = 0x05;  // version (v5: opacity is full TemporalConfig)
 
     // tempoBPM as uint16 (BPM*10), big-endian
     uint16_t bpmFixed = (uint16_t)(tempoBPM * 10.0f + 0.5f);
     buf[i++] = (uint8_t)(bpmFixed >> 8);
     buf[i++] = (uint8_t)(bpmFixed & 0xFF);
 
-    // 16 layers x 110 bytes each
+    // 16 layers x 116 bytes each
     for (int li = 0; li < MAX_LAYERS; li++) {
         const Layer& layer = layers[li];
         buf[i++] = layer.mode;
-        buf[i++] = layer.opacity;
+        i += serializeTC(buf + i, layer.opacityTemporal);
         i += serializeComponent(buf + i, layer.hue);
         i += serializeComponent(buf + i, layer.sat);
         i += serializeComponent(buf + i, layer.val);
@@ -291,17 +292,10 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
 }
 
 bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
-    static const size_t V3_STATE_SIZE = 1540;
-    static const size_t V4_STATE_SIZE = 1764;
-
     if (!buf) return false;
     if (buf[0] != 0x4C) return false;
-
-    const bool isV3 = (buf[1] == 0x03);
-    const bool isV4 = (buf[1] == 0x04);
-    if (!isV3 && !isV4) return false;
-    if (isV3 && len < V3_STATE_SIZE) return false;
-    if (isV4 && len < V4_STATE_SIZE) return false;
+    if (buf[1] != 0x05) return false;
+    if (len < STATE_SIZE) return false;
 
     size_t i = 2;
 
@@ -311,21 +305,14 @@ bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
 
     for (int li = 0; li < MAX_LAYERS; li++) {
         Layer& layer = layers[li];
-        layer.mode    = buf[i++];
-        layer.opacity = buf[i++];
+        layer.mode = buf[i++];
+        i += deserializeTC(buf + i, layer.opacityTemporal);
         i += deserializeComponent(buf + i, layer.hue);
         i += deserializeComponent(buf + i, layer.sat);
         i += deserializeComponent(buf + i, layer.val);
         i += deserializeTC(buf + i, layer.linesTemporal);
-
-        if (isV4) {
-            i += deserializeTC(buf + i, layer.motionOffsetTemporal);
-            i += deserializeTC(buf + i, layer.motionLengthTemporal);
-        } else {
-            // v3: no motion TCs — initialise to sensible defaults
-            layer.motionOffsetTemporal = { 0, 0, 0,  0, 16, true };
-            layer.motionLengthTemporal = { 0, 0, 16, 0, 16, true };
-        }
+        i += deserializeTC(buf + i, layer.motionOffsetTemporal);
+        i += deserializeTC(buf + i, layer.motionLengthTemporal);
     }
 
     return true;
@@ -339,10 +326,11 @@ void LightEngine::render() {
     frameCounter++;
 
     for (int li = 0; li < MAX_LAYERS; li++) {
-        if (layers[li].opacity == 0 || layers[li].mode == MODE_OFF) continue;
+        if (layers[li].mode == MODE_OFF) continue;
 
         LayerEffectiveParams ep;
         applyTimeModulationForLayer(li, ep);
+        effectiveOpacity[li] = ep.opacity;
 
         memset(layerBuffers[li], 0, numLeds * sizeof(HSVColor));
         renderLayer(li, layerBuffers[li], ep);
@@ -369,6 +357,7 @@ void LightEngine::applyTimeModulationForLayer(int layerIdx, LayerEffectiveParams
     out.valWavelength = applyTemporalConfig(layer.val.wavelengthTemporal);
     out.valPhase      = applyTemporalConfig(layer.val.phaseShiftTemporal);
 
+    out.opacity       = applyTemporalConfig(layer.opacityTemporal);
     out.lines         = applyTemporalConfig(layer.linesTemporal);
     out.motionOffset  = applyTemporalConfig(layer.motionOffsetTemporal);
     out.motionLength  = applyTemporalConfig(layer.motionLengthTemporal);
@@ -389,9 +378,9 @@ void LightEngine::compositeLayersToOutput() {
     memset(leds, 0, numLeds * sizeof(HSVColor));
 
     for (int li = 0; li < MAX_LAYERS; li++) {
-        if (layers[li].opacity == 0 || layers[li].mode == MODE_OFF) continue;
+        if (layers[li].mode == MODE_OFF) continue;
 
-        float alpha = layers[li].opacity / 127.0f;
+        float alpha = effectiveOpacity[li] / 127.0f;
         if (alpha <= 0.0f) continue;
         if (alpha > 1.0f)  alpha = 1.0f;
 
@@ -601,15 +590,17 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
 // ============================================================================
 
 // Return pointer to the TemporalConfig for [layerIdx][panelId][paramId].
-// panelId: 0=hue, 1=sat, 2=val, 3=mask (linesTemporal, paramId ignored)
+// panelId: 0=hue, 1=sat, 2=val, 3=lines, 4=motionOffset, 5=motionLength,
+//          6=opacity (paramId ignored for panelId >= 3)
 // paramId: 0=ampTemporal, 1=offsetTemporal, 2=wavelengthTemporal, 3=phaseShiftTemporal
 static TemporalConfig* resolveTemporalConfig(Layer* layers, int layerIdx, int panelId, int paramId) {
     if (layerIdx < 0 || layerIdx > 15) return nullptr;
-    if (panelId  < 0 || panelId  >  5) return nullptr;
+    if (panelId  < 0 || panelId  >  6) return nullptr;
 
     if (panelId == 3) return &layers[layerIdx].linesTemporal;
     if (panelId == 4) return &layers[layerIdx].motionOffsetTemporal;
     if (panelId == 5) return &layers[layerIdx].motionLengthTemporal;
+    if (panelId == 6) return &layers[layerIdx].opacityTemporal;
 
     ColorComponent* comp = (panelId == 0) ? &layers[layerIdx].hue
                          : (panelId == 1) ? &layers[layerIdx].sat

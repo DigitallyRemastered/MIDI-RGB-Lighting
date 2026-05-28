@@ -114,7 +114,7 @@ struct Layer {
     TemporalConfig linesTemporal;              // controls number of parallel lines
     TemporalConfig motionOffsetTemporal;        // start-LED offset for dots/comets modes
     TemporalConfig motionLengthTemporal;        // segment length for dots/comets modes
-    uint8_t        opacity;                    // 0-127: blend weight (0 = skip rendering)
+    TemporalConfig opacityTemporal;            // layer blend weight (offset=base opacity)
     CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet mode)
 };
 
@@ -179,7 +179,7 @@ public:
     /**
      * Get a CC parameter value (0-127) for a specific layer (0-15).
      * CC 1 = Mode (LayerMode 0-6)
-     * CC 2 = Opacity (0-127; 0 = layer skipped entirely)
+    * CC 2 = Opacity base offset (0-127; temporal blend weight baseline)
      * CC 3 = Hue Waveshape  (0-3)
      * CC 4 = Sat Waveshape  (0-3)
      * CC 5 = Val Waveshape  (0-3)
@@ -195,19 +195,19 @@ public:
 
     // Serialized state layout:
     //   [0]    magic   = 0x4C
-    //   [1]    version = 0x04
+    //   [1]    version = 0x05
     //   [2-3]  tempoBPM*10 as uint16, big-endian
-    //   [4..]  16 layers × 110 bytes each:
-    //            mode(1), opacity(1)                             =   2 bytes
+    //   [4..]  16 layers × 116 bytes each:
+    //            mode(1), opacityTemporal(7)                     =   8 bytes
     //            hue ColorComponent: waveshape(1) + 4×7 TC       =  29 bytes
     //            sat ColorComponent: 29 bytes
     //            val ColorComponent: 29 bytes
     //            linesTemporal: 7 bytes
     //            motionOffsetTemporal: 7 bytes
     //            motionLengthTemporal: 7 bytes
-    //          = 2 + 3×29 + 7 + 7 + 7 = 110 bytes per layer
-    //   Total: 4 + 16×110 = 1764 bytes
-    static const size_t STATE_SIZE = 1764;
+    //          = 8 + 3×29 + 7 + 7 + 7 = 116 bytes per layer
+    //   Total: 4 + 16×116 = 1860 bytes
+    static const size_t STATE_SIZE = 1860;
 
     size_t serializeState  (uint8_t* buf, size_t bufLen) const;
     bool   deserializeState(const uint8_t* buf, size_t len);
@@ -242,6 +242,7 @@ private:
 
     float    tempoBPM;      // Current DAW tempo (60.0-240.0 BPM)
     uint32_t frameCounter;  // Auto-incremented each render()
+    float    effectiveOpacity[MAX_LAYERS];  // per-layer opacity from temporal modulation
 
     // ========================================================================
     // Physics Constants
@@ -265,6 +266,7 @@ private:
         float hueAmp, hueOffset, hueWavelength, huePhase;
         float satAmp, satOffset, satWavelength, satPhase;
         float valAmp, valOffset, valWavelength, valPhase;
+        float opacity;
         float lines;
         float motionOffset;  // start-LED for dots/comets modes
         float motionLength;  // segment length for dots/comets modes
