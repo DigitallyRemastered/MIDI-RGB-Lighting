@@ -25,7 +25,7 @@
 #include <Preferences.h>
 #include "secrets.h"  // WiFi credentials — do not commit this file
 
-#define NUM_LEDS 108
+#define NUM_LEDS 100       // Initial LED count (can be changed at runtime via SysEx 0x09)
 #define DATA_PIN 2  // GPIO 2 (safer than GPIO 0 on ESP32)
 #define BLE_DEVICE_NAME "DR Perform 3"  // shown in Bluetooth scan lists
 
@@ -33,8 +33,8 @@
 // Hardware Setup
 // ============================================================================
 
-// FastLED buffer (CRGB is an RGB struct)
-CRGB leds[NUM_LEDS];
+// FastLED buffer (CRGB is an RGB struct) — allocated for maximum possible LED count
+CRGB leds[LightEngine::MAX_LEDS];
 
 // Light engine instance (manages all state and logic)
 LightEngine engine(NUM_LEDS);
@@ -180,6 +180,13 @@ void loop() {
     copyEngineToFastLED();
     FastLED.show();
     lastRender = now;
+
+    // Update FastLED if the active LED count changed via SysEx 0x09
+    if (engine.numLedsChanged()) {
+      FastLED[0].setLeds(leds, engine.getNumLEDs());
+      Serial.print("[LED] Count changed to ");
+      Serial.println(engine.getNumLEDs());
+    }
   }
 
   // Stability diagnostics every 5 seconds
@@ -268,7 +275,7 @@ void OnSysEx(byte* data, unsigned int length) {
 
 void copyEngineToFastLED() {
   const HSVColor* engineLEDs = engine.getLEDs();
-  for (int i = 0; i < NUM_LEDS; i++) {
+  for (int i = 0; i < engine.getNumLEDs(); i++) {
     leds[i] = CHSV(engineLEDs[i].h, engineLEDs[i].s, engineLEDs[i].v);
   }
 }

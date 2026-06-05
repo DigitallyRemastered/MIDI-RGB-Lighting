@@ -124,6 +124,8 @@ struct Layer {
 
 class LightEngine {
 public:
+    static const int MAX_LEDS = 2000;  // Maximum LED buffer size (allocated once)
+
     LightEngine(int numLeds = 108);
     ~LightEngine();
 
@@ -159,6 +161,8 @@ public:
      *   0x06 - Request save to persistent memory
      *   0x07 - Full panel TemporalConfig (atomic)
      *   0x08 - Single panel TemporalConfig field
+     *   0x09 - Set active LED count: [F0, 7D, 09, countHi, countLo, F7]
+     *          count = (countHi << 7) | countLo, clamped to [1, MAX_LEDS]
      */
     void handleSysEx(const uint8_t* data, uint16_t length);
 
@@ -171,6 +175,16 @@ public:
 
     const HSVColor* getLEDs()    const { return leds; }
     int             getNumLEDs() const { return numLeds; }
+
+    /** Set the active LED count at runtime (clamped to [1, MAX_LEDS]). */
+    void setNumLeds(int n);
+
+    /**
+     * Returns true (and clears the flag) if the active LED count changed
+     * since the last call.  Arduino firmware uses this to re-register
+     * FastLED with the new count.
+     */
+    bool numLedsChanged();
 
     // ========================================================================
     // State Access
@@ -222,8 +236,8 @@ private:
     static const int MAX_LAYERS = 16;
 
     int        numLeds;
-    HSVColor*  leds;                      // Final composited output buffer
-    HSVColor*  layerBuffers[MAX_LAYERS];  // Per-layer render buffers [numLeds] each
+    HSVColor*  leds;                      // Final composited output buffer (MAX_LEDS allocated)
+    HSVColor*  layerBuffers[MAX_LAYERS];  // Per-layer render buffers (MAX_LEDS allocated each)
 
     // ========================================================================
     // Layer State
@@ -256,6 +270,7 @@ private:
     static const int COLOR_PHASE[64];  // 64-point sine lookup, values -100..+100
 
     bool _saveStateRequested = false;
+    bool _numLedsChanged     = false;
 
     // ========================================================================
     // Per-frame effective parameters
@@ -359,6 +374,9 @@ LIGHT_ENGINE_EXPORT int             lightEngine_getNumLEDs(void* engine);
 // Per-layer state access (layer: 0-15, cc: 1-19)
 LIGHT_ENGINE_EXPORT int  lightEngine_getLayerCC(void* engine, int layer, int cc);
 LIGHT_ENGINE_EXPORT void lightEngine_setLayerCC(void* engine, int layer, int cc, int value);
+
+// Active LED count (clamped to [1, MAX_LEDS])
+LIGHT_ENGINE_EXPORT void lightEngine_setNumLeds(void* engine, int n);
 
 // Metadata
 LIGHT_ENGINE_EXPORT const char* lightEngine_getEngineName   ();

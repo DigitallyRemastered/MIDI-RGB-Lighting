@@ -96,9 +96,10 @@ static void initColorComponent(ColorComponent& p, uint8_t defOffset, uint8_t def
 }
 
 LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
-    leds = new HSVColor[numLeds];
+    // Allocate full MAX_LEDS capacity once; numLeds controls how many are active.
+    leds = new HSVColor[MAX_LEDS];
     for (int li = 0; li < MAX_LAYERS; li++) {
-        layerBuffers[li] = new HSVColor[numLeds];
+        layerBuffers[li] = new HSVColor[MAX_LEDS];
     }
 
     // All layers start MODE_OFF with opacity temporal offset=0 (fully transparent)
@@ -122,11 +123,12 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     frameCounter        = 0;
     tempoBPM            = 120.0f;
     _saveStateRequested = false;
+    _numLedsChanged     = false;
     memset(effectiveOpacity, 0, sizeof(effectiveOpacity));
 
-    memset(leds, 0, numLeds * sizeof(HSVColor));
+    memset(leds, 0, MAX_LEDS * sizeof(HSVColor));
     for (int li = 0; li < MAX_LAYERS; li++) {
-        memset(layerBuffers[li], 0, numLeds * sizeof(HSVColor));
+        memset(layerBuffers[li], 0, MAX_LEDS * sizeof(HSVColor));
     }
 }
 
@@ -135,6 +137,27 @@ LightEngine::~LightEngine() {
     for (int li = 0; li < MAX_LAYERS; li++) {
         delete[] layerBuffers[li];
     }
+}
+
+// ============================================================================
+// LED Count
+// ============================================================================
+
+void LightEngine::setNumLeds(int n) {
+    if (n < 1)        n = 1;
+    if (n > MAX_LEDS) n = MAX_LEDS;
+    if (n != numLeds) {
+        numLeds = n;
+        _numLedsChanged = true;
+    }
+}
+
+bool LightEngine::numLedsChanged() {
+    if (_numLedsChanged) {
+        _numLedsChanged = false;
+        return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -699,6 +722,13 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             _saveStateRequested = true;
             break;
 
+        case 0x09:  // Set active LED count: [F0, 7D, 09, countHi, countLo, F7]
+            if (length >= (uint16_t)(offset + 4)) {
+                int n = (((int)data[offset + 2]) << 7) | (int)data[offset + 3];
+                setNumLeds(n);
+            }
+            break;
+
         case 0x07:  // Full panel TemporalConfig (atomic)
             // [F0, 7D, 07, layerIdx, panelId, paramId,
             //  profile, amplitude, offset, phaseL, phaseH, period, direction, F7]
@@ -812,6 +842,10 @@ int lightEngine_getLayerCC(void* engine, int layer, int cc) {
 
 void lightEngine_setLayerCC(void* engine, int layer, int cc, int value) {
     static_cast<LightEngine*>(engine)->setLayerCC(layer, cc, value);
+}
+
+void lightEngine_setNumLeds(void* engine, int n) {
+    static_cast<LightEngine*>(engine)->setNumLeds(n);
 }
 
 const char* lightEngine_getEngineName() {

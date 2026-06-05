@@ -9,11 +9,11 @@
 #include <LightEngine.h>  // Library include
 #include <EEPROM.h>
 
-#define NUM_LEDS 108
+#define NUM_LEDS 100       // Initial LED count (can be changed at runtime via SysEx 0x09)
 #define DATA_PIN 0
 
-// FastLED buffer (CRGB is an RGB struct)
-CRGB leds[NUM_LEDS];
+// FastLED buffer (CRGB is an RGB struct) — allocated for maximum possible LED count
+CRGB leds[LightEngine::MAX_LEDS];
 
 // Light engine instance (manages all state and logic)
 LightEngine engine(NUM_LEDS);
@@ -83,6 +83,13 @@ void loop() {
     copyEngineToFastLED();
     FastLED.show();
     t = 0;
+
+    // Update FastLED if the active LED count changed via SysEx 0x09
+    if (engine.numLedsChanged()) {
+      FastLED[0].setLeds(leds, engine.getNumLEDs());
+      Serial.print("[LED] Count changed to ");
+      Serial.println(engine.getNumLEDs());
+    }
   }
 
   // Save state when the plugin sends a save-state SysEx (0x06)
@@ -126,7 +133,7 @@ void OnSysEx(const byte* data, uint16_t length, bool complete) {
 
 void copyEngineToFastLED() {
   const HSVColor* engineLEDs = engine.getLEDs();
-  for (int i = 0; i < NUM_LEDS; i++) {
+  for (int i = 0; i < engine.getNumLEDs(); i++) {
     leds[i] = CHSV(engineLEDs[i].h, engineLEDs[i].s, engineLEDs[i].v);
   }
 }
