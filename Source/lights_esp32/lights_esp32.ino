@@ -27,7 +27,7 @@
 
 #define NUM_LEDS 108
 #define DATA_PIN 2  // GPIO 2 (safer than GPIO 0 on ESP32)
-#define BLE_DEVICE_NAME "DR Perform 2"  // shown in Bluetooth scan lists
+#define BLE_DEVICE_NAME "DR Perform 3"  // shown in Bluetooth scan lists
 
 // ============================================================================
 // Hardware Setup
@@ -148,10 +148,12 @@ void setup() {
   });
 
   // Reuse the same handlers — both transports feed the same engine
-  // BLE-MIDI callbacks include a timestamp parameter; bridge to the shared handlers
-  BLEMidiServer.setNoteOnCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOn(ch, note, vel); });
-  BLEMidiServer.setNoteOffCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOff(ch, note, vel); });
-  BLEMidiServer.setControlChangeCallback([](uint8_t ch, uint8_t ctrl, uint8_t val, uint16_t) { OnControlChange(ch, ctrl, val); });
+  // BLE-MIDI callbacks include a timestamp parameter; bridge to the shared handlers.
+  // NOTE: BLE-MIDI library delivers 0-based channels (0-15); add 1 to match the
+  // 1-based convention expected by the engine and the rtpMIDI path.
+  BLEMidiServer.setNoteOnCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOn(ch + 1, note, vel); });
+  BLEMidiServer.setNoteOffCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOff(ch + 1, note, vel); });
+  BLEMidiServer.setControlChangeCallback([](uint8_t ch, uint8_t ctrl, uint8_t val, uint16_t) { OnControlChange(ch + 1, ctrl, val); });
   BLEMidiServer.setSysExCallback([](uint8_t *data, uint16_t length, uint16_t) { OnSysEx(data, length); });
   
   // Load persisted state before first render

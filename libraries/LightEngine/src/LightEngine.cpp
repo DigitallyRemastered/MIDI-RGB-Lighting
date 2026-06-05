@@ -70,6 +70,10 @@ const ModeInfo* getModeInfo(int modeId) {
 static inline uint8_t clampSV(float v);
 static inline uint8_t wrapHue(float h);
 
+struct RGBf { float r, g, b; };
+static RGBf     hsvToRgbF(uint8_t h, uint8_t s, uint8_t v);
+static HSVColor rgbFToHsv(float r, float g, float b);
+
 // ============================================================================
 // Constructor / Destructor
 // ============================================================================
@@ -388,9 +392,12 @@ void LightEngine::compositeLayersToOutput() {
 
         for (int i = 0; i < numLeds; i++) {
             if (layerBuf[i].v == 0) continue;  // LED is off in this layer
-            leds[i].h = (uint8_t)wrapHue ((layerBuf[i].h * alpha + leds[i].h * (1.0f - alpha)));
-            leds[i].s = (uint8_t)clampSV ((layerBuf[i].s * alpha + leds[i].s * (1.0f - alpha)));
-            leds[i].v = (uint8_t)clampSV ((layerBuf[i].v * alpha + leds[i].v * (1.0f - alpha)));
+            RGBf src = hsvToRgbF(layerBuf[i].h, layerBuf[i].s, layerBuf[i].v);
+            RGBf dst = hsvToRgbF(leds[i].h,     leds[i].s,     leds[i].v);
+            float r = src.r * alpha + dst.r * (1.0f - alpha);
+            float g = src.g * alpha + dst.g * (1.0f - alpha);
+            float b = src.b * alpha + dst.b * (1.0f - alpha);
+            leds[i] = rgbFToHsv(r, g, b);
         }
     }
 }
@@ -472,6 +479,47 @@ static inline uint8_t clampSV(float v) {
 
 static inline uint8_t wrapHue(float h) {
     return (uint8_t)((int)h & 0xFF);
+}
+
+// Convert HSV (0-255 each) to normalised RGB floats (0.0-1.0).
+static RGBf hsvToRgbF(uint8_t h, uint8_t s, uint8_t v) {
+    float vf = v / 255.0f;
+    float sf = s / 255.0f;
+    if (sf == 0.0f) return { vf, vf, vf };
+    float hf = (h / 255.0f) * 6.0f;
+    int   i  = (int)hf;
+    float f  = hf - i;
+    float p  = vf * (1.0f - sf);
+    float q  = vf * (1.0f - sf * f);
+    float t  = vf * (1.0f - sf * (1.0f - f));
+    switch (i % 6) {
+        case 0:  return { vf, t,  p  };
+        case 1:  return { q,  vf, p  };
+        case 2:  return { p,  vf, t  };
+        case 3:  return { p,  q,  vf };
+        case 4:  return { t,  p,  vf };
+        default: return { vf, p,  q  };
+    }
+}
+
+// Convert normalised RGB floats (0.0-1.0) back to HSV (0-255 each).
+static HSVColor rgbFToHsv(float r, float g, float b) {
+    float maxC  = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    float minC  = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    float delta = maxC - minC;
+    float hf = 0.0f;
+    if (delta > 0.0f) {
+        if      (maxC == r) hf = (g - b) / delta;
+        else if (maxC == g) hf = 2.0f + (b - r) / delta;
+        else                hf = 4.0f + (r - g) / delta;
+        hf /= 6.0f;
+        if (hf < 0.0f) hf += 1.0f;
+    }
+    HSVColor out;
+    out.h = (uint8_t)(hf * 255.0f + 0.5f);
+    out.s = (maxC > 0.0f) ? (uint8_t)(delta / maxC * 255.0f + 0.5f) : 0;
+    out.v = (uint8_t)(maxC * 255.0f + 0.5f);
+    return out;
 }
 
 void LightEngine::renderSolid(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
