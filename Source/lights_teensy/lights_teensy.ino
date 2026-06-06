@@ -86,9 +86,12 @@ void loop() {
 
     // Update FastLED if the active LED count changed via SysEx 0x09
     if (engine.numLedsChanged()) {
-      FastLED[0].setLeds(leds, engine.getNumLEDs());
+      const int newCount = engine.getNumLEDs();
+      // Black out LEDs above the new active count (once, not every frame)
+      for (int i = newCount; i < NUM_LEDS; i++)
+        leds[i] = CRGB::Black;
       Serial.print("[LED] Count changed to ");
-      Serial.println(engine.getNumLEDs());
+      Serial.println(newCount);
     }
   }
 
@@ -133,7 +136,8 @@ void OnSysEx(const byte* data, uint16_t length, bool complete) {
 
 void copyEngineToFastLED() {
   const HSVColor* engineLEDs = engine.getLEDs();
-  for (int i = 0; i < engine.getNumLEDs(); i++) {
+  const int activeCount = engine.getNumLEDs();
+  for (int i = 0; i < activeCount && i < NUM_LEDS; i++) {
     leds[i] = CHSV(engineLEDs[i].h, engineLEDs[i].s, engineLEDs[i].v);
   }
 }

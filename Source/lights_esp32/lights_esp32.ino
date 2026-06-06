@@ -95,6 +95,12 @@ void loadState() {
 void setup() {
   Serial.begin(115200);
   Serial.println("Light Engine - ESP32 WiFi-MIDI Version");
+
+  Serial.printf("[DIAG] Heap free: %u  min-ever: %u  max-alloc: %u  renders: %lu  worst-jitter: %luus  BLE:%s  WiFi:%s\n",
+      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+      renderCount, maxRenderJitter,
+      bleConnected ? "connected" : "waiting",
+      WiFi.status() == WL_CONNECTED ? "connected" : "lost");
   
   // Initialize FastLED
   FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);
@@ -183,9 +189,12 @@ void loop() {
 
     // Update FastLED if the active LED count changed via SysEx 0x09
     if (engine.numLedsChanged()) {
-      FastLED[0].setLeds(leds, engine.getNumLEDs());
+      const int newCount = engine.getNumLEDs();
+      // Black out LEDs above the new active count (once, not every frame)
+      for (int i = newCount; i < NUM_LEDS; i++)
+        leds[i] = CRGB::Black;
       Serial.print("[LED] Count changed to ");
-      Serial.println(engine.getNumLEDs());
+      Serial.println(newCount);
     }
   }
 
@@ -275,7 +284,8 @@ void OnSysEx(byte* data, unsigned int length) {
 
 void copyEngineToFastLED() {
   const HSVColor* engineLEDs = engine.getLEDs();
-  for (int i = 0; i < engine.getNumLEDs(); i++) {
+  const int activeCount = engine.getNumLEDs();
+  for (int i = 0; i < activeCount && i < NUM_LEDS; i++) {
     leds[i] = CHSV(engineLEDs[i].h, engineLEDs[i].s, engineLEDs[i].v);
   }
 }
