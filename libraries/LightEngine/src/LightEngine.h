@@ -124,7 +124,7 @@ struct Layer {
 
 class LightEngine {
 public:
-    static const int MAX_LEDS = 2000;  // Maximum LED buffer size (allocated once)
+    static const int MAX_LEDS = 1000;  // Maximum LED buffer size (allocated once)
 
     LightEngine(int numLeds = 108);
     ~LightEngine();
