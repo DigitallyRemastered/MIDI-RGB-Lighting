@@ -9,11 +9,18 @@
 #include <LightEngine.h>  // Library include
 #include <EEPROM.h>
 
-#define NUM_LEDS 100       // Initial LED count (can be changed at runtime via SysEx 0x09)
+#define NUM_LEDS 100       // Default LED count when no saved state exists.  The active
+                           // count is runtime-changeable (SysEx 0x09 / state sync) and
+                           // persists in the saved engine state.
 #define DATA_PIN 0
 
 // FastLED buffer (CRGB is an RGB struct) — allocated for maximum possible LED count
 CRGB leds[LightEngine::MAX_LEDS];
+
+// FastLED controller handle + currently registered LED count.  setLeds() on the
+// controller re-registers the strip when the active count changes at runtime.
+CLEDController* ledController = nullptr;
+int currentLedCount = NUM_LEDS;
 
 // Light engine instance (manages all state and logic)
 LightEngine engine(NUM_LEDS);
@@ -27,6 +34,12 @@ elapsedMicros t;
 
 // EEPROM base address for saved state
 static const int EEPROM_BASE = 0;
+
+// The full engine state must fit this board's EEPROM.  Teensy 3.6 has 4 KB;
+// Teensy 4.0's emulated EEPROM is only ~1080 bytes and cannot hold the state —
+// fail at compile time rather than silently truncating saves.
+static_assert(LightEngine::STATE_SIZE <= (size_t) E2END + 1,
+              "LightEngine state does not fit this board's EEPROM");
 
 void saveState() {
   uint8_t buf[LightEngine::STATE_SIZE];
@@ -57,18 +70,20 @@ void loadState() {
 // ============================================================================
 
 void setup() {
-  FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);
-  
   usbMIDI.setHandleNoteOff(OnNoteOff);
   usbMIDI.setHandleNoteOn(OnNoteOn);
   usbMIDI.setHandleControlChange(OnControlChange);
   usbMIDI.setHandleSysEx(OnSysEx);
-  
+
   Serial.begin(250000);
 
-  // Load persisted state before first render
+  // Load persisted state first so FastLED is registered at the saved LED count
+  // (the engine clamps it to [1, MAX_LEDS]; defaults to NUM_LEDS when no state).
   loadState();
-  
+  engine.numLedsChanged();  // clear the flag — we register at the loaded count here
+  currentLedCount = engine.getNumLEDs();
+  ledController = &FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, currentLedCount);
+
   // Initial render
   engine.render();
   copyEngineToFastLED();
@@ -84,12 +99,18 @@ void loop() {
     FastLED.show();
     t = 0;
 
-    // Update FastLED if the active LED count changed via SysEx 0x09
+    // Re-register FastLED if the active LED count changed (SysEx 0x09 or state sync)
     if (engine.numLedsChanged()) {
       const int newCount = engine.getNumLEDs();
-      // Black out LEDs above the new active count (once, not every frame)
-      for (int i = newCount; i < NUM_LEDS; i++)
-        leds[i] = CRGB::Black;
+      if (newCount < currentLedCount) {
+        // Push one final frame at the old count to physically blank the tail —
+        // after shrinking, those LEDs would otherwise keep their last colour.
+        for (int i = newCount; i < currentLedCount; i++)
+          leds[i] = CRGB::Black;
+        FastLED.show();
+      }
+      ledController->setLeds(leds, newCount);
+      currentLedCount = newCount;
       Serial.print("[LED] Count changed to ");
       Serial.println(newCount);
     }
@@ -135,9 +156,12 @@ void OnSysEx(const byte* data, uint16_t length, bool complete) {
 // ============================================================================
 
 void copyEngineToFastLED() {
-  const HSVColor* engineLEDs = engine.getLEDs();
+  // Use the engine's authoritative RGB output verbatim.  Assigning CHSV here
+  // would apply FastLED's hsv2rgb_rainbow remapping and the strip would no
+  // longer match the plugin preview (which draws the same RGB bytes).
+  const RGBColor* engineRGB = engine.getRGB();
   const int activeCount = engine.getNumLEDs();
-  for (int i = 0; i < activeCount && i < NUM_LEDS; i++) {
-    leds[i] = CHSV(engineLEDs[i].h, engineLEDs[i].s, engineLEDs[i].v);
+  for (int i = 0; i < activeCount && i < LightEngine::MAX_LEDS; i++) {
+    leds[i].setRGB(engineRGB[i].r, engineRGB[i].g, engineRGB[i].b);
   }
 }

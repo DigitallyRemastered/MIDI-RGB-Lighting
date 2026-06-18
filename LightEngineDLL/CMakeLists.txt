@@ -44,6 +44,11 @@ target_include_directories(LightEngine
         ${ARDUINO_LIGHT_ENGINE_DIR}
 )
 
+# Opt in to dllexport for the C API.  When the same engine source is compiled
+# statically into the Light Studio plugin this is NOT defined, so the symbols
+# stay internal to that binary.
+target_compile_definitions(LightEngine PRIVATE LIGHT_ENGINE_BUILD_DLL)
+
 # Platform-specific compile options
 if(MSVC)
     # Windows: Export symbols, disable warnings about C functions

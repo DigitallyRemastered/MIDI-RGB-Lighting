@@ -24,11 +24,18 @@
     #include <cstdlib>
     #include <cstring>
     #include <cmath>
-    
+
     typedef struct {
         uint8_t h, s, v;
     } HSVColor;
 #endif
+
+// Final composited output color.  The engine owns the HSV→RGB conversion
+// (spectrum mapping) so firmware and the plugin preview consume identical
+// bytes — FastLED's CHSV→CRGB rainbow mapping must NOT be applied on top.
+typedef struct {
+    uint8_t r, g, b;
+} RGBColor;
 
 // ============================================================================
 // Waveshape Profile — shared by spatial ColorPanel and TemporalConfig
@@ -163,6 +170,23 @@ public:
      *   0x08 - Single panel TemporalConfig field
      *   0x09 - Set active LED count: [F0, 7D, 09, countHi, countLo, F7]
      *          count = (countHi << 7) | countLo, clamped to [1, MAX_LEDS]
+     *   0x0A - Full-state sync fragment: [F0, 7D, 0A, seqNum, totalFrags,
+     *          ...7-bit-encoded payload..., F7].  Fragments are reassembled
+     *          internally; a complete, exact-size set is decoded and applied
+     *          via deserializeState().  Works on every target (Teensy, ESP32,
+     *          plugin) since the logic lives here rather than in firmware.
+     *   0x0B - Master lights enable: [F0, 7D, 0B, on, F7] (on: 0 = dark)
+     *   0x0C - Full layer bundle (mode + waveshapes + all 16 TC slots) in one
+     *          message: [F0, 7D, 0C, layerIdx, mode, hueWave, satWave, valWave,
+     *          <16 slots x 7 bytes: profile, amplitude, offset, phaseL, phaseH,
+     *          period, direction>, F7].  Slot order is fixed: hue amp/off/wl/phase,
+     *          sat amp/off/wl/phase, val amp/off/wl/phase, lines, motionOffset,
+     *          motionLength, opacity (the same order used by pushAllLayersToHardware
+     *          in the plugin).  Replaces sending CC1/3/4/5 plus 16 separate 0x07
+     *          messages per layer with a single packet, so a full 16-layer sync
+     *          costs 16 UDP datagrams instead of up to ~320 — critical for rtpMIDI,
+     *          whose recovery journal does not cover SysEx (lost packets are gone
+     *          for good, so fewer packets per sync means fewer chances to lose one).
      */
     void handleSysEx(const uint8_t* data, uint16_t length);
 
@@ -173,8 +197,24 @@ public:
     /** Render all enabled layers and composite to LED buffer.  Call at ~30 Hz. */
     void render();
 
+    /**
+     * Master lights enable.  When false, render() zeroes the output buffers
+     * and returns immediately, so the strip and preview go dark while all
+     * layer state stays intact.  Settable remotely via SysEx 0x0B.
+     */
+    void setLightsEnabled(bool on) { lightsEnabled = on; }
+    bool getLightsEnabled() const  { return lightsEnabled; }
+
     const HSVColor* getLEDs()    const { return leds; }
     int             getNumLEDs() const { return numLeds; }
+
+    /**
+     * Final composited colors as RGB — the authoritative output.  Firmware
+     * writes these bytes to the strip verbatim and the plugin preview draws
+     * them verbatim, so both always show the same colors.  getLEDs() remains
+     * as the HSV view for diagnostics (e.g. the spatial wave plots).
+     */
+    const RGBColor* getRGB() const { return rgbOut; }
 
     /** Set the active LED count at runtime (clamped to [1, MAX_LEDS]). */
     void setNumLeds(int n);
@@ -193,11 +233,10 @@ public:
     /**
      * Get a CC parameter value (0-127) for a specific layer (0-15).
      * CC 1 = Mode (LayerMode 0-6)
-    * CC 2 = Opacity base offset (0-127; temporal blend weight baseline)
      * CC 3 = Hue Waveshape  (0-3)
      * CC 4 = Sat Waveshape  (0-3)
      * CC 5 = Val Waveshape  (0-3)
-     * All spatial amplitude/offset/wavelength/phaseShift are set via SysEx
+     * Opacity and all amplitude/offset/wavelength/phaseShift are set via SysEx
      * TemporalConfig messages (0x07 full / 0x08 single field).
      */
     int  getLayerCC(int layer, int cc) const;
@@ -207,11 +246,13 @@ public:
      */
     void setLayerCC(int layer, int cc, int value);
 
-    // Serialized state layout:
+    // Serialized state layout (v6):
     //   [0]    magic   = 0x4C
-    //   [1]    version = 0x05
+    //   [1]    version = 0x06
     //   [2-3]  tempoBPM*10 as uint16, big-endian
-    //   [4..]  16 layers × 116 bytes each:
+    //   [4-5]  active LED count as uint16, big-endian (clamped to [1, MAX_LEDS]
+    //          on load; persists the count across power cycles)
+    //   [6..]  16 layers × 116 bytes each:
     //            mode(1), opacityTemporal(7)                     =   8 bytes
     //            hue ColorComponent: waveshape(1) + 4×7 TC       =  29 bytes
     //            sat ColorComponent: 29 bytes
@@ -220,8 +261,8 @@ public:
     //            motionOffsetTemporal: 7 bytes
     //            motionLengthTemporal: 7 bytes
     //          = 8 + 3×29 + 7 + 7 + 7 = 116 bytes per layer
-    //   Total: 4 + 16×116 = 1860 bytes
-    static const size_t STATE_SIZE = 1860;
+    //   Total: 6 + 16×116 = 1862 bytes
+    static const size_t STATE_SIZE = 1862;
 
     size_t serializeState  (uint8_t* buf, size_t bufLen) const;
     bool   deserializeState(const uint8_t* buf, size_t len);
@@ -236,7 +277,8 @@ private:
     static const int MAX_LAYERS = 16;
 
     int        numLeds;
-    HSVColor*  leds;                      // Final composited output buffer (MAX_LEDS allocated)
+    HSVColor*  leds;                      // Composited output, HSV view (MAX_LEDS allocated)
+    RGBColor*  rgbOut;                    // Composited output, authoritative RGB (MAX_LEDS allocated)
     HSVColor*  layerBuffers[MAX_LAYERS];  // Per-layer render buffers (MAX_LEDS allocated each)
 
     // ========================================================================
@@ -271,6 +313,29 @@ private:
 
     bool _saveStateRequested = false;
     bool _numLedsChanged     = false;
+    bool lightsEnabled       = true;   // master enable — render() outputs black when false
+
+    // ========================================================================
+    // SysEx 0x0A full-state sync reassembly
+    // The plugin pushes the whole serialized state as 7-bit-encoded fragments.
+    // Every fragment except the last carries exactly SYNC_PAYLOAD_PER_FRAG
+    // encoded bytes, so each is stored at seqNum * SYNC_PAYLOAD_PER_FRAG —
+    // duplicated or reordered delivery (rtpMIDI runs over UDP) is harmless.
+    // The buffer is heap-allocated on first use (3 KB) so instances that never
+    // receive a state push (e.g. the plugin's own preview engine) pay nothing.
+    // ========================================================================
+    static const uint16_t SYNC_PAYLOAD_PER_FRAG = 192;  // must match the plugin sender
+    static const uint8_t  SYNC_MAX_FRAGS        = 16;   // 12 needed at STATE_SIZE=1862
+    static const uint32_t SYNC_STALE_FRAMES     = 90;   // ~3 s at 30 fps
+
+    uint8_t*  syncBuf_           = nullptr;
+    uint8_t   syncTotalFrags_    = 0;  // expected fragment count (0 = idle)
+    uint16_t  syncFragsMask_     = 0;  // bit n set = fragment n received
+    uint16_t  syncLastFragLen_   = 0;  // payload length of the final fragment
+    uint32_t  syncLastFragFrame_ = 0;  // frameCounter when last fragment arrived
+
+    // frag points at seqNum; len counts seqNum + totalFrags + payload bytes.
+    void handleStateSyncFragment(const uint8_t* frag, uint16_t len);
 
     // ========================================================================
     // Per-frame effective parameters
@@ -346,7 +411,11 @@ const ModeInfo* getModeInfo(int modeId);
 
 #ifndef ARDUINO
 
-#ifdef _WIN32
+// Only the dedicated DLL build (LightEngineDLL/CMakeLists defines
+// LIGHT_ENGINE_BUILD_DLL) exports these symbols.  When the engine is compiled
+// statically into the plugin/app, the C API stays internal so it does not
+// pollute the host binary's export table.
+#if defined(_WIN32) && defined(LIGHT_ENGINE_BUILD_DLL)
   #define LIGHT_ENGINE_EXPORT __declspec(dllexport)
 #else
   #define LIGHT_ENGINE_EXPORT
@@ -369,7 +438,12 @@ LIGHT_ENGINE_EXPORT void lightEngine_handleSysEx        (void* engine, const uin
 // Rendering
 LIGHT_ENGINE_EXPORT void            lightEngine_render    (void* engine);
 LIGHT_ENGINE_EXPORT const HSVColor* lightEngine_getLEDs   (void* engine);
+LIGHT_ENGINE_EXPORT const RGBColor* lightEngine_getRGB    (void* engine);
 LIGHT_ENGINE_EXPORT int             lightEngine_getNumLEDs(void* engine);
+
+// State serialization (buf must hold LightEngine::STATE_SIZE bytes; returns
+// bytes written, 0 on failure).  Used by the plugin's full-state push.
+LIGHT_ENGINE_EXPORT size_t lightEngine_serializeState(void* engine, uint8_t* buf, size_t bufLen);
 
 // Per-layer state access (layer: 0-15, cc: 1-19)
 LIGHT_ENGINE_EXPORT int  lightEngine_getLayerCC(void* engine, int layer, int cc);
@@ -377,6 +451,9 @@ LIGHT_ENGINE_EXPORT void lightEngine_setLayerCC(void* engine, int layer, int cc,
 
 // Active LED count (clamped to [1, MAX_LEDS])
 LIGHT_ENGINE_EXPORT void lightEngine_setNumLeds(void* engine, int n);
+
+// Master lights enable (0 = dark; render() zeroes output and short-circuits)
+LIGHT_ENGINE_EXPORT void lightEngine_setLightsEnabled(void* engine, int enabled);
 
 // Metadata
 LIGHT_ENGINE_EXPORT const char* lightEngine_getEngineName   ();
