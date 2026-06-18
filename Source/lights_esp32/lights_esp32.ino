@@ -17,6 +17,7 @@
  */
 
 #include <WiFi.h>
+#define USE_EXT_CALLBACKS   // enables AppleMIDI exception + RTP callbacks
 #include <AppleMIDI.h>
 #define USE_NIMBLE          // Use NimBLE stack (~35KB) instead of BlueDroid (~70KB)
 #include <BLEMidi.h>        // ESP32-BLE-MIDI library
@@ -25,7 +26,9 @@
 #include <Preferences.h>
 #include "secrets.h"  // WiFi credentials — do not commit this file
 
-#define NUM_LEDS 100       // Initial LED count (can be changed at runtime via SysEx 0x09)
+#define NUM_LEDS 100       // Default LED count when no saved state exists.  The active
+                           // count is runtime-changeable (SysEx 0x09 / state sync) and
+                           // persists in the saved engine state.
 #define DATA_PIN 2  // GPIO 2 (safer than GPIO 0 on ESP32)
 #define BLE_DEVICE_NAME "DR Perform 3"  // shown in Bluetooth scan lists
 
@@ -35,6 +38,11 @@
 
 // FastLED buffer (CRGB is an RGB struct) — allocated for maximum possible LED count
 CRGB leds[LightEngine::MAX_LEDS];
+
+// FastLED controller handle + currently registered LED count.  setLeds() on the
+// controller re-registers the strip when the active count changes at runtime.
+CLEDController* ledController = nullptr;
+int currentLedCount = NUM_LEDS;
 
 // Light engine instance (manages all state and logic)
 LightEngine engine(NUM_LEDS);
@@ -54,6 +62,21 @@ unsigned long lastDiagMillis = 0;
 const unsigned long DIAG_INTERVAL_MS = 5000;
 unsigned long maxRenderJitter = 0;   // worst-case deviation from 33333µs
 unsigned long renderCount = 0;
+
+// Drop / exception tracking
+volatile uint32_t rtpDropsSend = 0;
+volatile uint32_t rtpDropsRecv = 0;
+volatile uint32_t rtpExceptions = 0;
+uint16_t lastRtpSeq = 0;
+bool rtpSeqInit = false;
+volatile uint32_t rtpSeqGaps = 0;
+
+// NOTE: SysEx 0x0A full-state sync reassembly now lives inside LightEngine
+// (shared by Teensy, ESP32, and the plugin) — this sketch just forwards SysEx.
+
+// Flag set by BLE connect callback so loop() sends CC 119 on the next iteration
+// (avoids calling BLE TX from inside the NimBLE callback thread).
+static volatile bool requestSyncViaBLE = false;
 
 // ============================================================================
 // Persistent State
@@ -96,28 +119,36 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Light Engine - ESP32 WiFi-MIDI Version");
 
-  Serial.printf("[DIAG] Heap free: %u  min-ever: %u  max-alloc: %u  renders: %lu  worst-jitter: %luus  BLE:%s  WiFi:%s\n",
-      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
-      renderCount, maxRenderJitter,
-      bleConnected ? "connected" : "waiting",
-      WiFi.status() == WL_CONNECTED ? "connected" : "lost");
+  Serial.printf("[DIAG] boot  heap: %u  min-ever: %u\n",
+      ESP.getFreeHeap(), ESP.getMinFreeHeap());
   
-  // Initialize FastLED
-  FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);
-  
+  // Load persisted state first so FastLED is registered at the saved LED count
+  // (the engine clamps it to [1, MAX_LEDS]; defaults to NUM_LEDS when no state).
+  loadState();
+  engine.numLedsChanged();  // clear the flag — we register at the loaded count here
+  currentLedCount = engine.getNumLEDs();
+  ledController = &FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, currentLedCount);
+
   // Connect to WiFi
+  WiFi.persistent(false);   // skip writing creds to NVS flash every boot — shaves
+                            // a small but nonzero delay off connect, and avoids
+                            // flash wear from repeated power-cycling.
   Serial.print("Connecting to WiFi: ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
-  
+
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  
+
   // Disable modem sleep — eliminates the 50-100ms beacon-interval latency that
   // wrecks rtpMIDI. Costs a few extra mA but is essential for real-time MIDI.
   WiFi.setSleep(false);
+
+  // Max TX power — improves link margin/SNR, which lowers the underlying
+  // packet-loss rate that UDP-based rtpMIDI has no retransmission for.
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
   Serial.println("\nWiFi Connected!");
   Serial.print("IP Address: ");
@@ -130,9 +161,41 @@ void setup() {
   AppleMIDI.setHandleConnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc, const char* name) {
     Serial.print("[rtpMIDI] Connected: ");
     Serial.println(name);
+    // Ask the plugin to push its current engine state over the newly established session.
+    // CC 119 on channel 1 is the agreed "please send me your state" signal.
+    MIDI.sendControlChange(119, 0, 1);
+    Serial.println("[Sync] Sent CC 119 requesting full state from plugin");
   });
   AppleMIDI.setHandleDisconnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc) {
     Serial.println("[rtpMIDI] Disconnected");
+  });
+
+  // Log every library-detected drop/exception so they're visible on Serial.
+  AppleMIDI.setHandleException([](const APPLEMIDI_NAMESPACE::ssrc_t&, const APPLEMIDI_NAMESPACE::Exception& e, const int32_t val) {
+    if (e == APPLEMIDI_NAMESPACE::Exception::SendPacketsDropped) {
+      rtpDropsSend++;
+      Serial.printf("[DROP] Send packet dropped (total %u)\n", rtpDropsSend);
+    } else if (e == APPLEMIDI_NAMESPACE::Exception::ReceivedPacketsDropped) {
+      rtpDropsRecv++;
+      Serial.printf("[DROP] Recv packet dropped (total %u)\n", rtpDropsRecv);
+    } else {
+      rtpExceptions++;
+      Serial.printf("[DROP] AppleMIDI exception %d val=%d (total %u)\n", (int)e, (int)val, rtpExceptions);
+    }
+  });
+
+  // Detect sequence-number gaps in received RTP packets (= lost UDP datagrams).
+  AppleMIDI.setHandleReceivedRtp([](const APPLEMIDI_NAMESPACE::ssrc_t&, const APPLEMIDI_NAMESPACE::Rtp_t& rtp, const int32_t&) {
+    if (rtpSeqInit) {
+      uint16_t expected = lastRtpSeq + 1;
+      if (rtp.sequenceNr != expected) {
+        rtpSeqGaps++;
+        Serial.printf("[DROP] RTP seq gap: expected %u got %u (total gaps %u)\n",
+          expected, rtp.sequenceNr, rtpSeqGaps);
+      }
+    }
+    lastRtpSeq = rtp.sequenceNr;
+    rtpSeqInit = true;
   });
 
   MIDI.setHandleNoteOn(OnNoteOn);
@@ -147,6 +210,9 @@ void setup() {
   BLEMidiServer.setOnConnectCallback([]() {
     bleConnected = true;
     Serial.println("[BLE-MIDI] Connected");
+    // Ask the plugin to push its current engine state so the Arduino stays in sync.
+    // Set flag; loop() will send CC 119 on the next iteration (safe BLE TX context).
+    requestSyncViaBLE = true;
   });
   BLEMidiServer.setOnDisconnectCallback([]() {
     bleConnected = false;
@@ -162,9 +228,6 @@ void setup() {
   BLEMidiServer.setControlChangeCallback([](uint8_t ch, uint8_t ctrl, uint8_t val, uint16_t) { OnControlChange(ch + 1, ctrl, val); });
   BLEMidiServer.setSysExCallback([](uint8_t *data, uint16_t length, uint16_t) { OnSysEx(data, length); });
   
-  // Load persisted state before first render
-  loadState();
-
   Serial.println("Ready!");
   
   // Initial render
@@ -174,7 +237,15 @@ void setup() {
 }
 
 void loop() {
-  MIDI.read();  // Process incoming MIDI
+  while (MIDI.read()) {}  // drain all pending events each tick
+
+  // Send BLE sync request outside the NimBLE callback (safe TX context).
+  if (requestSyncViaBLE) {
+    requestSyncViaBLE = false;
+    // CC 119, value 0, channel 0 (0-indexed = MIDI ch 1)
+    BLEMidiServer.controlChange(0, 119, 0);
+    Serial.println("[Sync] Sent CC 119 requesting full state from plugin (BLE)");
+  }
   
   // Render at 30Hz (every 33,333 microseconds)
   unsigned long now = micros();
@@ -187,14 +258,15 @@ void loop() {
     FastLED.show();
     lastRender = now;
 
-    // Update FastLED if the active LED count changed via SysEx 0x09
+    // Track active LED count changes (SysEx 0x09 or state sync).
+    // We do NOT call ledController->setLeds() here: FastLED's ESP32 RMT backend
+    // initialises its internal led_strip object at addLeds() time with a fixed
+    // pixel count and asserts if show() is called with a different size.
+    // copyEngineToFastLED() blanks any tail LEDs beyond the active count, so the
+    // physical strip always sees the right colours even when the count shrinks.
     if (engine.numLedsChanged()) {
-      const int newCount = engine.getNumLEDs();
-      // Black out LEDs above the new active count (once, not every frame)
-      for (int i = newCount; i < NUM_LEDS; i++)
-        leds[i] = CRGB::Black;
       Serial.print("[LED] Count changed to ");
-      Serial.println(newCount);
+      Serial.println(engine.getNumLEDs());
     }
   }
 
@@ -202,11 +274,13 @@ void loop() {
   unsigned long nowMs = millis();
   if (nowMs - lastDiagMillis >= DIAG_INTERVAL_MS) {
     lastDiagMillis = nowMs;
-    Serial.printf("[DIAG] Heap free: %u  min-ever: %u  max-alloc: %u  renders: %lu  worst-jitter: %luus  BLE:%s  WiFi:%s\n",
-      ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
+    Serial.printf("[DIAG] Heap free: %u  min-ever: %u  renders: %lu  jitter: %luus  RSSI: %ddBm  BLE:%s  WiFi:%s  drops(send/recv/gap): %u/%u/%u\n",
+      ESP.getFreeHeap(), ESP.getMinFreeHeap(),
       renderCount, maxRenderJitter,
+      WiFi.RSSI(),
       bleConnected ? "connected" : "waiting",
-      WiFi.status() == WL_CONNECTED ? "connected" : "lost");
+      WiFi.status() == WL_CONNECTED ? "connected" : "lost",
+      rtpDropsSend, rtpDropsRecv, rtpSeqGaps);
     maxRenderJitter = 0; // reset per window
   }
 
@@ -222,39 +296,26 @@ void loop() {
 
 void OnNoteOn(byte channel, byte note, byte velocity) {
   engine.handleNoteOn(channel, note, velocity);
-
-  Serial.print("Note On received on channel: ");
-  Serial.print(channel);
-  Serial.print(" | note: ");
-  Serial.print(note);
-  Serial.println();
 }
 
 void OnNoteOff(byte channel, byte note, byte velocity) {
   engine.handleNoteOff(channel, note, velocity);
-  Serial.print("Note Off received on channel: ");
-  Serial.print(channel);
-  Serial.print(" | note: ");
-  Serial.print(note);
-  Serial.println();
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
   engine.handleControlChange(channel, control, value);
-
-  // Debug output
-  Serial.print("CC received:");
-  Serial.print(control);
-  Serial.print(" | value: ");
-  Serial.print(value);
-  Serial.println();
 }
 
 void OnSysEx(byte* data, unsigned int length) {
   // Different MIDI transports deliver different framing:
   //   rtpMIDI (Arduino MIDI Library) includes 0xF0/0xF7 in the callback data.
   //   BLE-MIDI (custom Midi.cpp parser)  strips 0xF0/0xF7 — only data bytes.
-  // engine.handleSysEx() requires full [F0 ... F7] framing.
+  // engine.handleSysEx() requires full [F0 ... F7] framing.  All message types
+  // — including 0x0A state-sync fragments — are handled inside the engine.
+
+  // -------------------------------------------------------------------------
+  // Re-frame if needed and forward everything to the engine.
+  // -------------------------------------------------------------------------
   if (length > 0 && data[0] == 0xF0) {
     // Already framed — pass directly (rtpMIDI path)
     engine.handleSysEx(data, length);
@@ -267,15 +328,9 @@ void OnSysEx(byte* data, unsigned int length) {
     engine.handleSysEx(framedData, length + 2);
   }
 
-  // Debug output - show first few bytes of received SysEx
-    Serial.print("SysEx received (");
-    Serial.print(length);
-    Serial.print(" bytes): ");
-    for (int i = 0; i < (int)min((unsigned int)8, length); i++) {
-      Serial.print(data[i], HEX);
-      Serial.print(" ");
-    }
-    Serial.println();
+  // Per-message SysEx debug logging removed — it blocked the NimBLE receive task
+  // during bulk preset sync (300+ messages), causing BLE packet drops.
+  // Use the 5-second DIAG heartbeat for health monitoring instead.
 }
 
 // ============================================================================
@@ -283,9 +338,18 @@ void OnSysEx(byte* data, unsigned int length) {
 // ============================================================================
 
 void copyEngineToFastLED() {
-  const HSVColor* engineLEDs = engine.getLEDs();
+  // Use the engine's authoritative RGB output verbatim.  Assigning CHSV here
+  // would apply FastLED's hsv2rgb_rainbow remapping and the strip would no
+  // longer match the plugin preview (which draws the same RGB bytes).
+  // The controller is always driven at currentLedCount (registered at boot).
+  // LEDs beyond the engine's active count are blanked so tail pixels go dark
+  // when the count shrinks without needing to resize the FastLED controller.
+  const RGBColor* engineRGB = engine.getRGB();
   const int activeCount = engine.getNumLEDs();
-  for (int i = 0; i < activeCount && i < NUM_LEDS; i++) {
-    leds[i] = CHSV(engineLEDs[i].h, engineLEDs[i].s, engineLEDs[i].v);
+  for (int i = 0; i < currentLedCount; i++) {
+    if (i < activeCount)
+      leds[i].setRGB(engineRGB[i].r, engineRGB[i].g, engineRGB[i].b);
+    else
+      leds[i] = CRGB::Black;
   }
 }

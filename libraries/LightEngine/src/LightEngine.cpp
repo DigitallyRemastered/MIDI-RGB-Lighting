@@ -32,7 +32,6 @@ const int LightEngine::COLOR_PHASE[64] = {
 
 static const ParameterInfo PARAMETER_TABLE[] = {
     { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash,5=GravityComet)"},
-    { 2, "Opacity",        "Layer blend weight base (temporal; 0=transparent, 127=opaque)"},
     { 3, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
     { 4, "Sat Waveshape",  "Spatial waveshape for saturation"},
     { 5, "Val Waveshape",  "Spatial waveshape for brightness"}
@@ -48,13 +47,14 @@ static const ModeInfo MODE_TABLE[] = {
 };
 
 const ParameterInfo* getParameterInfo(int ccNumber) {
-    if (ccNumber < 1 || ccNumber > 5) return nullptr;
-    return &PARAMETER_TABLE[ccNumber - 1];
+    for (const auto& info : PARAMETER_TABLE)
+        if (info.ccNumber == ccNumber) return &info;
+    return nullptr;
 }
 
 int getAllParameters(const ParameterInfo** outArray) {
     *outArray = PARAMETER_TABLE;
-    return 5;
+    return 4;
 }
 
 int getModeCount() {
@@ -97,7 +97,8 @@ static void initColorComponent(ColorComponent& p, uint8_t defOffset, uint8_t def
 
 LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     // Allocate full MAX_LEDS capacity once; numLeds controls how many are active.
-    leds = new HSVColor[MAX_LEDS];
+    leds   = new HSVColor[MAX_LEDS];
+    rgbOut = new RGBColor[MAX_LEDS];
     for (int li = 0; li < MAX_LAYERS; li++) {
         layerBuffers[li] = new HSVColor[MAX_LEDS];
     }
@@ -127,6 +128,7 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
     memset(effectiveOpacity, 0, sizeof(effectiveOpacity));
 
     memset(leds, 0, MAX_LEDS * sizeof(HSVColor));
+    memset(rgbOut, 0, MAX_LEDS * sizeof(RGBColor));
     for (int li = 0; li < MAX_LAYERS; li++) {
         memset(layerBuffers[li], 0, MAX_LEDS * sizeof(HSVColor));
     }
@@ -134,9 +136,11 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
 
 LightEngine::~LightEngine() {
     delete[] leds;
+    delete[] rgbOut;
     for (int li = 0; li < MAX_LAYERS; li++) {
         delete[] layerBuffers[li];
     }
+    delete[] syncBuf_;
 }
 
 // ============================================================================
@@ -171,17 +175,15 @@ void LightEngine::handleControlChange(uint8_t channel, uint8_t control, uint8_t 
     Layer& layer = layers[li];
 
     // CC 1 = Mode
-    // CC 2 = Opacity base offset (0=transparent, 127=opaque)
     // CC 3 = Hue Waveshape  (0-3)
     // CC 4 = Sat Waveshape  (0-3)
     // CC 5 = Val Waveshape  (0-3)
-    // All spatial amp/offset/wl/phase are set via SysEx TemporalConfig messages.
+    // Opacity is set via SysEx 0x07/0x08 (opacityTemporal, panelId=6).
     switch (control) {
-        case 1:  layer.mode              = value % 6;    break;
-        case 2:  layer.opacityTemporal.offset = value;   break;
-        case 3:  layer.hue.waveshape     = value & 0x03; break;
-        case 4:  layer.sat.waveshape     = value & 0x03; break;
-        case 5:  layer.val.waveshape     = value & 0x03; break;
+        case 1:  layer.mode          = value % 6;    break;
+        case 3:  layer.hue.waveshape = value & 0x03; break;
+        case 4:  layer.sat.waveshape = value & 0x03; break;
+        case 5:  layer.val.waveshape = value & 0x03; break;
         default: break;
     }
 }
@@ -231,7 +233,6 @@ int LightEngine::getLayerCC(int layer, int cc) const {
 
     switch (cc) {
         case 1: return l.mode;
-        case 2: return l.opacityTemporal.offset;
         case 3: return l.hue.waveshape;
         case 4: return l.sat.waveshape;
         case 5: return l.val.waveshape;
@@ -295,12 +296,16 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
     size_t i = 0;
 
     buf[i++] = 0x4C;  // magic
-    buf[i++] = 0x05;  // version (v5: opacity is full TemporalConfig)
+    buf[i++] = 0x06;  // version (v6: adds active LED count)
 
     // tempoBPM as uint16 (BPM*10), big-endian
     uint16_t bpmFixed = (uint16_t)(tempoBPM * 10.0f + 0.5f);
     buf[i++] = (uint8_t)(bpmFixed >> 8);
     buf[i++] = (uint8_t)(bpmFixed & 0xFF);
+
+    // active LED count as uint16, big-endian (so it survives power cycles)
+    buf[i++] = (uint8_t)((numLeds >> 8) & 0xFF);
+    buf[i++] = (uint8_t)(numLeds & 0xFF);
 
     // 16 layers x 116 bytes each
     for (int li = 0; li < MAX_LAYERS; li++) {
@@ -319,20 +324,25 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
 }
 
 bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
-    if (!buf) return false;
+    if (!buf || len < STATE_SIZE) return false;  // length first: never read past caller's buffer
     if (buf[0] != 0x4C) return false;
-    if (buf[1] != 0x05) return false;
-    if (len < STATE_SIZE) return false;
+    if (buf[1] != 0x06) return false;
 
     size_t i = 2;
 
     uint16_t bpmFixed = ((uint16_t)buf[i] << 8) | buf[i + 1];
     i += 2;
     tempoBPM = bpmFixed / 10.0f;
+    if (tempoBPM < 20.0f || tempoBPM > 999.0f) tempoBPM = 120.0f;  // corrupt tempo would break period math
+
+    int count = ((int)buf[i] << 8) | buf[i + 1];
+    i += 2;
+    setNumLeds(count);  // clamps to [1, MAX_LEDS]; sets numLedsChanged for FastLED re-registration
 
     for (int li = 0; li < MAX_LAYERS; li++) {
         Layer& layer = layers[li];
-        layer.mode = buf[i++];
+        uint8_t m  = buf[i++];
+        layer.mode = (m < 6) ? m : (uint8_t)MODE_OFF;  // reject corrupt mode bytes
         i += deserializeTC(buf + i, layer.opacityTemporal);
         i += deserializeComponent(buf + i, layer.hue);
         i += deserializeComponent(buf + i, layer.sat);
@@ -351,6 +361,12 @@ bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
 
 void LightEngine::render() {
     frameCounter++;
+
+    if (!lightsEnabled) {
+        memset(leds,   0, numLeds * sizeof(HSVColor));
+        memset(rgbOut, 0, numLeds * sizeof(RGBColor));
+        return;
+    }
 
     for (int li = 0; li < MAX_LAYERS; li++) {
         if (layers[li].mode == MODE_OFF) continue;
@@ -402,26 +418,37 @@ void LightEngine::renderLayer(int layerIdx, HSVColor* buf, const LayerEffectiveP
 }
 
 void LightEngine::compositeLayersToOutput() {
-    memset(leds, 0, numLeds * sizeof(HSVColor));
-
+    // Hoist per-layer blend weights so the per-LED loop only visits live layers.
+    float alphas[MAX_LAYERS];
+    bool  live[MAX_LAYERS];
     for (int li = 0; li < MAX_LAYERS; li++) {
-        if (layers[li].mode == MODE_OFF) continue;
+        float a = effectiveOpacity[li] / 127.0f;
+        if (a > 1.0f) a = 1.0f;
+        alphas[li] = a;
+        live[li]   = (layers[li].mode != MODE_OFF) && (a > 0.0f);
+    }
 
-        float alpha = effectiveOpacity[li] / 127.0f;
-        if (alpha <= 0.0f) continue;
-        if (alpha > 1.0f)  alpha = 1.0f;
-
-        const HSVColor* layerBuf = layerBuffers[li];
-
-        for (int i = 0; i < numLeds; i++) {
-            if (layerBuf[i].v == 0) continue;  // LED is off in this layer
-            RGBf src = hsvToRgbF(layerBuf[i].h, layerBuf[i].s, layerBuf[i].v);
-            RGBf dst = hsvToRgbF(leds[i].h,     leds[i].s,     leds[i].v);
-            float r = src.r * alpha + dst.r * (1.0f - alpha);
-            float g = src.g * alpha + dst.g * (1.0f - alpha);
-            float b = src.b * alpha + dst.b * (1.0f - alpha);
-            leds[i] = rgbFToHsv(r, g, b);
+    // Blend each LED in float RGB across all layers, quantizing only once at
+    // the end.  The previous layer-major pass round-tripped through 8-bit HSV
+    // after every layer, costing precision and two extra conversions per
+    // layer per LED.  rgbOut is the authoritative output (strip + preview);
+    // leds keeps the HSV view for diagnostics.
+    for (int i = 0; i < numLeds; i++) {
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+        for (int li = 0; li < MAX_LAYERS; li++) {
+            if (!live[li]) continue;
+            const HSVColor& c = layerBuffers[li][i];
+            if (c.v == 0) continue;  // LED is off in this layer (transparent)
+            RGBf src = hsvToRgbF(c.h, c.s, c.v);
+            const float a = alphas[li];
+            r = src.r * a + r * (1.0f - a);
+            g = src.g * a + g * (1.0f - a);
+            b = src.b * a + b * (1.0f - a);
         }
+        rgbOut[i].r = (uint8_t)(r * 255.0f + 0.5f);
+        rgbOut[i].g = (uint8_t)(g * 255.0f + 0.5f);
+        rgbOut[i].b = (uint8_t)(b * 255.0f + 0.5f);
+        leds[i] = rgbFToHsv(r, g, b);
     }
 }
 
@@ -729,6 +756,11 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             }
             break;
 
+        case 0x0B:  // Master lights enable: [F0, 7D, 0B, on, F7]
+            if (length >= (uint16_t)(offset + 4))
+                lightsEnabled = data[offset + 2] != 0;
+            break;
+
         case 0x07:  // Full panel TemporalConfig (atomic)
             // [F0, 7D, 07, layerIdx, panelId, paramId,
             //  profile, amplitude, offset, phaseL, phaseH, period, direction, F7]
@@ -748,6 +780,49 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
                 }
             }
             break;
+
+        case 0x0C: {  // Full layer bundle: mode + waveshapes + all 16 TC slots in one packet.
+            // [F0, 7D, 0C, layerIdx, mode, hueWave, satWave, valWave,
+            //  <16 slots x 7 bytes: profile, amplitude, offset, phaseL, phaseH,
+            //  period, direction>, F7].  Slot order matches pushAllLayersToHardware().
+            static const struct { int8_t panelId, paramId; } kBundleSlots[16] = {
+                { 0, 0 }, { 0, 1 }, { 0, 2 }, { 0, 3 },
+                { 1, 0 }, { 1, 1 }, { 1, 2 }, { 1, 3 },
+                { 2, 0 }, { 2, 1 }, { 2, 2 }, { 2, 3 },
+                { 3, 0 }, { 4, 0 }, { 5, 0 }, { 6, 0 },
+            };
+            if (length >= (uint16_t)(offset + 120)) {
+                const int layerIdx = (int)data[offset + 2];
+                if (layerIdx >= 0 && layerIdx <= 15) {
+                    const uint8_t ch = (uint8_t)(layerIdx + 1);
+                    handleControlChange(ch, 1, data[offset + 3]);
+                    handleControlChange(ch, 3, data[offset + 4]);
+                    handleControlChange(ch, 4, data[offset + 5]);
+                    handleControlChange(ch, 5, data[offset + 6]);
+
+                    const uint8_t* p = data + offset + 7;
+                    for (int i = 0; i < 16; i++, p += 7) {
+                        TemporalConfig* tc = resolveTemporalConfig(
+                            layers, layerIdx, kBundleSlots[i].panelId, kBundleSlots[i].paramId);
+                        if (!tc) continue;
+                        tc->profile    = p[0] & 0x03;
+                        tc->amplitude  = p[1];
+                        tc->offset     = p[2];
+                        tc->phaseShift = (uint16_t)p[3] | ((uint16_t)p[4] << 7);
+                        tc->period     = (p[5] > 0) ? p[5] : 1;
+                        tc->direction  = p[6] != 0;
+                    }
+                }
+            }
+            break;
+        }
+
+        case 0x0A: {  // Full-state sync fragment: [F0, 7D, 0A, seq, total, payload..., F7]
+            const int fragBytes = (int)length - offset - 3;  // seq + total + payload (excludes F7)
+            if (fragBytes >= 3)
+                handleStateSyncFragment(data + offset + 2, (uint16_t)fragBytes);
+            break;
+        }
 
         case 0x08:  // Single panel TemporalConfig field
             // [F0, 7D, 08, layerIdx, panelId, paramId, wfField, value, F7]
@@ -778,6 +853,89 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
         default:
             break;
     }
+}
+
+// ============================================================================
+// SysEx 0x0A — Full-State Sync Reassembly
+// ============================================================================
+
+// Decode 7-bit MIDI bulk data (1 packed-MSBs byte + up to 7 data bytes per
+// group) into raw bytes.  Writes at most rawCap bytes into rawOut; returns the
+// number of raw bytes produced.  rawOut may alias encoded (in-place decode):
+// each 8-byte group shrinks to 7, so writes always trail reads.
+static size_t decode7bit(const uint8_t* encoded, size_t encodedLen, uint8_t* rawOut, size_t rawCap) {
+    size_t rawIdx = 0;
+    size_t i = 0;
+    while (i < encodedLen) {
+        uint8_t msbs = encoded[i++];
+        for (int k = 0; k < 7 && i < encodedLen; k++, i++) {
+            if (rawIdx >= rawCap) return rawIdx;
+            rawOut[rawIdx++] = (encoded[i] & 0x7F) | ((msbs >> k) & 1) << 7;
+        }
+    }
+    return rawIdx;
+}
+
+void LightEngine::handleStateSyncFragment(const uint8_t* frag, uint16_t len) {
+    if (len < 3) return;  // need seqNum, totalFrags, and at least one payload byte
+    const uint8_t  seqNum     = frag[0];
+    const uint8_t  totalFrags = frag[1];
+    const uint8_t* fragData   = frag + 2;
+    const uint16_t fragLen    = (uint16_t)(len - 2);
+    const bool     isLast     = (seqNum + 1 == totalFrags);
+
+    // Validate the header before touching any buffer.
+    if (totalFrags == 0 || totalFrags > SYNC_MAX_FRAGS || seqNum >= totalFrags) return;
+    // All fragments carry exactly SYNC_PAYLOAD_PER_FRAG encoded bytes except
+    // the last, which may be shorter (but never longer or empty).
+    if ((!isLast && fragLen != SYNC_PAYLOAD_PER_FRAG) ||
+        ( isLast && (fragLen == 0 || fragLen > SYNC_PAYLOAD_PER_FRAG))) return;
+
+    if (!syncBuf_) {
+        syncBuf_ = new uint8_t[(size_t)SYNC_MAX_FRAGS * SYNC_PAYLOAD_PER_FRAG];
+        if (!syncBuf_) return;  // out of memory — drop the fragment
+    }
+
+    // Start a fresh reassembly when the expected count changes or the previous
+    // partial sync has gone stale.  Staleness is measured in render frames
+    // (~30 fps) so it behaves identically on firmware and in the plugin.  A
+    // frame-counter reset (SysEx 0x03) mid-push at worst restarts reassembly,
+    // which self-heals on the next push.
+    if (totalFrags != syncTotalFrags_ ||
+        (uint32_t)(frameCounter - syncLastFragFrame_) > SYNC_STALE_FRAMES) {
+        syncTotalFrags_  = totalFrags;
+        syncFragsMask_   = 0;
+        syncLastFragLen_ = 0;
+    }
+    syncLastFragFrame_ = frameCounter;
+
+    // Fixed-offset store: duplicated or reordered fragments rewrite the same
+    // region.  seqNum <= SYNC_MAX_FRAGS-1 and fragLen <= SYNC_PAYLOAD_PER_FRAG,
+    // so this cannot exceed the buffer.
+    memcpy(syncBuf_ + (size_t)seqNum * SYNC_PAYLOAD_PER_FRAG, fragData, fragLen);
+    syncFragsMask_ |= (uint16_t)(1u << seqNum);
+    if (isLast) syncLastFragLen_ = fragLen;
+
+    const uint16_t allMask = (uint16_t)((1u << totalFrags) - 1);
+    if (syncFragsMask_ != allMask) return;
+
+    const size_t encodedLen =
+        (size_t)(totalFrags - 1) * SYNC_PAYLOAD_PER_FRAG + syncLastFragLen_;
+
+    // A legitimate sync decodes to exactly STATE_SIZE raw bytes: each full
+    // 8-byte group yields 7, a trailing partial group of m yields m-1.
+    const size_t impliedRaw = (encodedLen / 8) * 7 +
+                              ((encodedLen % 8) > 0 ? (encodedLen % 8) - 1 : 0);
+    if (impliedRaw == STATE_SIZE) {
+        // Decode in place (see decode7bit) to avoid a ~1.9 KB stack buffer —
+        // BLE-MIDI callbacks can run on small stacks.
+        const size_t rawLen = decode7bit(syncBuf_, encodedLen, syncBuf_, encodedLen);
+        if (rawLen == STATE_SIZE)
+            deserializeState(syncBuf_, rawLen);
+    }
+    syncTotalFrags_  = 0;  // back to idle for the next sync
+    syncFragsMask_   = 0;
+    syncLastFragLen_ = 0;
 }
 
 // ============================================================================
@@ -832,6 +990,14 @@ const HSVColor* lightEngine_getLEDs(void* engine) {
     return static_cast<LightEngine*>(engine)->getLEDs();
 }
 
+const RGBColor* lightEngine_getRGB(void* engine) {
+    return static_cast<LightEngine*>(engine)->getRGB();
+}
+
+size_t lightEngine_serializeState(void* engine, uint8_t* buf, size_t bufLen) {
+    return static_cast<LightEngine*>(engine)->serializeState(buf, bufLen);
+}
+
 int lightEngine_getNumLEDs(void* engine) {
     return static_cast<LightEngine*>(engine)->getNumLEDs();
 }
@@ -846,6 +1012,10 @@ void lightEngine_setLayerCC(void* engine, int layer, int cc, int value) {
 
 void lightEngine_setNumLeds(void* engine, int n) {
     static_cast<LightEngine*>(engine)->setNumLeds(n);
+}
+
+void lightEngine_setLightsEnabled(void* engine, int enabled) {
+    static_cast<LightEngine*>(engine)->setLightsEnabled(enabled != 0);
 }
 
 const char* lightEngine_getEngineName() {
