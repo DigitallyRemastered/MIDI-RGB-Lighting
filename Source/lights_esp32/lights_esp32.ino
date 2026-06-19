@@ -25,6 +25,7 @@
 #include <LightEngine.h>  // Library include
 #include <Preferences.h>
 #include "secrets.h"  // WiFi credentials — do not commit this file
+#include <ArduinoOTA.h>
 
 #define NUM_LEDS 100       // Default LED count when no saved state exists.  The active
                            // count is runtime-changeable (SysEx 0x09 / state sync) and
@@ -109,6 +110,38 @@ void loadState() {
     Serial.println("No saved state found, using defaults");
   }
   prefs.end();
+}
+
+// ============================================================================
+// Startup Animation
+// ============================================================================
+
+void playStartupAnimation() {
+  const CRGB chartreuse = CRGB(127, 255, 0);
+  const CRGB limeGreen  = CRGB(50, 205, 50);
+  const int stripeWidth = 5;
+
+  for (int i = 0; i < currentLedCount; i++)
+    leds[i] = ((i / stripeWidth) % 2 == 0) ? chartreuse : limeGreen;
+
+  // Ramp up 0→255 over 2 seconds
+  unsigned long start = millis();
+  while (millis() - start < 2000) {
+    FastLED.setBrightness((uint8_t)(255UL * (millis() - start) / 2000));
+    FastLED.show();
+    delay(16);
+  }
+
+  // Ramp down 255→128 over 1 second
+  start = millis();
+  while (millis() - start < 1000) {
+    FastLED.setBrightness((uint8_t)(255 - 127UL * (millis() - start) / 1000));
+    FastLED.show();
+    delay(16);
+  }
+
+  FastLED.setBrightness(128);
+  FastLED.show();
 }
 
 // ============================================================================
@@ -229,8 +262,14 @@ void setup() {
   BLEMidiServer.setControlChangeCallback([](uint8_t ch, uint8_t ctrl, uint8_t val, uint16_t) { OnControlChange(ch + 1, ctrl, val); });
   BLEMidiServer.setSysExCallback([](uint8_t *data, uint16_t length, uint16_t) { OnSysEx(data, length); });
   
+  //ArduinoOTA
+  ArduinoOTA.setHostname(BLE_DEVICE_NAME);
+  ArduinoOTA.setPort(3232);  // explicit port forces mDNS to advertise it correctly
+  ArduinoOTA.begin();
+
   Serial.println("Ready!");
-  
+  playStartupAnimation();
+
   // Initial render
   engine.render();
   copyEngineToFastLED();
@@ -238,6 +277,7 @@ void setup() {
 }
 
 void loop() {
+  ArduinoOTA.handle();
   while (MIDI.read()) {}  // drain all pending events each tick
 
   // Send BLE sync request outside the NimBLE callback (safe TX context).
