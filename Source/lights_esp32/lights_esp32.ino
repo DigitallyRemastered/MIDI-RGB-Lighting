@@ -128,6 +128,7 @@ void setup() {
   engine.numLedsChanged();  // clear the flag — we register at the loaded count here
   currentLedCount = engine.getNumLEDs();
   ledController = &FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, currentLedCount);
+  FastLED.setCorrection(CRGB(0xFF, 0xD0, 0xF0));  // G at 82% instead of 69%
 
   // Connect to WiFi
   WiFi.persistent(false);   // skip writing creds to NVS flash every boot — shaves
@@ -318,6 +319,8 @@ void OnSysEx(byte* data, unsigned int length) {
   // -------------------------------------------------------------------------
   if (length > 0 && data[0] == 0xF0) {
     // Already framed — pass directly (rtpMIDI path)
+    // SysEx 0x0D: global brightness [F0, 7D, 0D, value, F7]
+    if (length >= 5 && data[2] == 0x0D) { FastLED.setBrightness(data[3]); return; }
     engine.handleSysEx(data, length);
   } else if (length <= 254) {
     // Unframed — reconstruct framing (BLE-MIDI path)
@@ -325,6 +328,8 @@ void OnSysEx(byte* data, unsigned int length) {
     framedData[0] = 0xF0;
     memcpy(framedData + 1, data, length);
     framedData[length + 1] = 0xF7;
+    // SysEx 0x0D: global brightness [F0, 7D, 0D, value, F7]
+    if ((length + 2) >= 5 && framedData[2] == 0x0D) { FastLED.setBrightness(framedData[3]); return; }
     engine.handleSysEx(framedData, length + 2);
   }
 
@@ -352,4 +357,5 @@ void copyEngineToFastLED() {
     else
       leds[i] = CRGB::Black;
   }
+  napplyGamma_video(leds, currentLedCount, 2.2);
 }

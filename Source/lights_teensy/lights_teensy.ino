@@ -83,6 +83,7 @@ void setup() {
   engine.numLedsChanged();  // clear the flag — we register at the loaded count here
   currentLedCount = engine.getNumLEDs();
   ledController = &FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, currentLedCount);
+  FastLED.setCorrection(TypicalLEDStrip);
 
   // Initial render
   engine.render();
@@ -145,10 +146,10 @@ void OnControlChange(byte channel, byte control, byte value) {
 }
 
 void OnSysEx(const byte* data, uint16_t length, bool complete) {
-  // Only process complete SysEx messages
-  if (complete) {
-    engine.handleSysEx(data, length);
-  }
+  if (!complete) return;
+  // SysEx 0x0D: global brightness [F0, 7D, 0D, value, F7]
+  if (length >= 5 && data[2] == 0x0D) { FastLED.setBrightness(data[3]); return; }
+  engine.handleSysEx(data, length);
 }
 
 // ============================================================================
@@ -164,4 +165,5 @@ void copyEngineToFastLED() {
   for (int i = 0; i < activeCount && i < LightEngine::MAX_LEDS; i++) {
     leds[i].setRGB(engineRGB[i].r, engineRGB[i].g, engineRGB[i].b);
   }
+  napplyGamma_video(leds, activeCount, 2.2);
 }
