@@ -118,7 +118,7 @@ void loadState() {
 
 void playStartupAnimation() {
   const CRGB chartreuse = CRGB(127, 255, 0);
-  const CRGB limeGreen  = CRGB(50, 205, 50);
+  const CRGB limeGreen  = CRGB(0, 255, 0);
   const int stripeWidth = 5;
 
   for (int i = 0; i < currentLedCount; i++)
