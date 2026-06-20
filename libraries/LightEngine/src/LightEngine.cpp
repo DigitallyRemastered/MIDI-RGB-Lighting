@@ -67,8 +67,8 @@ const ModeInfo* getModeInfo(int modeId) {
 }
 
 // Local helpers used across compositing/render passes.
-static inline uint8_t clampSV(float v);
-static inline uint8_t wrapHue(float h);
+static inline uint8_t clamp(float v);
+static inline uint8_t wrap(float h);
 
 struct RGBf { float r, g, b; };
 static RGBf     hsvToRgbF(uint8_t h, uint8_t s, uint8_t v);
@@ -521,13 +521,17 @@ float LightEngine::applyTemporalConfig(const TemporalConfig& tc) const {
 // Mode Renderers
 // ============================================================================
 
-static inline uint8_t clampSV(float v) {
+// Saturate a channel to 0-254. Kept for potential future use; per-layer H/S/V
+// now wrap (see wrap()) rather than clamp.
+static inline uint8_t clamp(float v) {
     if (v < 0.0f)   return 0;
     if (v > 254.0f) return 254;
     return (uint8_t)v;
 }
 
-static inline uint8_t wrapHue(float h) {
+// Wrap a channel into 0-255 (circular). Applied per-layer to H, S and V so each
+// channel wraps instead of saturating; layer compositing is unchanged.
+static inline uint8_t wrap(float h) {
     return (uint8_t)((int)h & 0xFF);
 }
 
@@ -575,9 +579,9 @@ static HSVColor rgbFToHsv(float r, float g, float b) {
 void LightEngine::renderSolid(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     const Layer& layer = layers[layerIdx];
     for (int i = 0; i < numLeds; i++) {
-        uint8_t h = wrapHue (evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-        uint8_t s = clampSV (evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-        uint8_t v = clampSV (evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
+        uint8_t h = wrap (evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+        uint8_t s = wrap (evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+        uint8_t v = wrap (evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
         setLED(buf, i, h, s, v);
     }
 }
@@ -598,9 +602,9 @@ void LightEngine::renderMovingDots(int layerIdx, HSVColor* buf, const LayerEffec
     for (int line = 0; line < lines; line++) {
         for (int j = 0; j < segLen; j++) {
             int idx = (startLed + j + line * lineOff) % numLeds;
-            uint8_t h = wrapHue (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-            uint8_t s = clampSV (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-            uint8_t v = clampSV (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
+            uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+            uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+            uint8_t v = wrap (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
             setLED(buf, idx, h, s, v);
         }
     }
@@ -622,9 +626,9 @@ void LightEngine::renderComets(int layerIdx, HSVColor* buf, const LayerEffective
             int idx = (startLed + j + line * lineOff) % numLeds;
             // j=0 is tail (dim), j=segLen-1 is head (full brightness)
             float trailFactor = (float)(j + 1) / (float)segLen;
-            uint8_t h = wrapHue (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-            uint8_t s = clampSV (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-            uint8_t v = clampSV (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * trailFactor);
+            uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+            uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+            uint8_t v = wrap (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * trailFactor);
             setLED(buf, idx, h, s, v);
         }
     }
@@ -640,9 +644,9 @@ void LightEngine::renderFlash(int layerIdx, HSVColor* buf, const LayerEffectiveP
     srand(frameCounter);
     randomLed = rand() % numLeds;
 #endif
-    uint8_t h = wrapHue (evalPanel(layer.hue, randomLed, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-    uint8_t s = clampSV (evalPanel(layer.sat, randomLed, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-    uint8_t v = clampSV (evalPanel(layer.val, randomLed, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
+    uint8_t h = wrap (evalPanel(layer.hue, randomLed, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+    uint8_t s = wrap (evalPanel(layer.sat, randomLed, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+    uint8_t v = wrap (evalPanel(layer.val, randomLed, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
     setLED(buf, randomLed, h, s, v);
 }
 
@@ -675,9 +679,9 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
             int idx = headIdx - t;
             if (idx < 0) break;
             float brightness = (float)(TAIL_LEN - t) / (float)TAIL_LEN;
-            uint8_t h = wrapHue (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-            uint8_t s = clampSV (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-            uint8_t v = clampSV (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
+            uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+            uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+            uint8_t v = wrap (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
             setLED(buf, idx, h, s, v);
         }
     }
