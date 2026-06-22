@@ -99,12 +99,17 @@ struct CometState {
 // ============================================================================
 
 enum LayerMode {
-    MODE_OFF           = 0,  // Layer produces no output (distinct from enabled=false)
-    MODE_SOLID         = 1,  // Pure panel evaluation — no procedural motion
-    MODE_MOVING_DOTS   = 2,  // Moving line segments
-    MODE_COMETS        = 3,  // Comet trails with brightness fade
-    MODE_FLASH         = 4,  // Random single-LED flash each frame
-    MODE_GRAVITY_COMET = 5   // Note-triggered comet under gravity physics
+    MODE_OFF             = 0,  // Layer produces no output (distinct from enabled=false)
+    MODE_SOLID           = 1,  // Pure panel evaluation — no procedural motion
+    MODE_MOVING_DOTS     = 2,  // Moving line segments
+    MODE_COMETS          = 3,  // Comet trails with brightness fade
+    MODE_FLASH           = 4,  // Random single-LED flash each frame
+    MODE_GRAVITY_COMET   = 5,  // Note-triggered comet under gravity physics
+    MODE_NOTE_GATE       = 6,  // Solid pattern, opacity gated by held notes on the layer's channel
+    MODE_BRIGHTNESS_SPIKE= 7,  // Note On slams brightness up, then decays (velocity-sensitive)
+    MODE_SAT_SPIKE       = 8,  // Note On pushes saturation to full, then decays
+    MODE_HUE_SPIKE       = 9,  // Note On rotates hue, then eases back
+    MODE_FIREBALL        = 10  // Note On launches a comet up the strip that burns out at the top
 };
 
 // ============================================================================
@@ -122,7 +127,11 @@ struct Layer {
     TemporalConfig motionOffsetTemporal;        // start-LED offset for dots/comets modes
     TemporalConfig motionLengthTemporal;        // segment length for dots/comets modes
     TemporalConfig opacityTemporal;            // layer blend weight (offset=base opacity)
-    CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet mode)
+    CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet / Fireball)
+
+    // Note-triggered transient state — runtime only, NOT serialized (like comets[]).
+    float          spikeLevel;                 // 0..1 envelope: set on Note On, decays each frame (spike modes)
+    uint8_t        heldCount;                  // notes currently held on this layer's channel (NoteGate mode)
 };
 
 // ============================================================================
@@ -365,6 +374,10 @@ private:
     void renderComets      (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderFlash       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderGravityComet(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+    void renderBrightnessSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+    void renderSatSpike       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+    void renderHueSpike       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+    void renderFireball       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
 
     // Utility
     void setLED(HSVColor* buf, int index, uint8_t h, uint8_t s, uint8_t v);

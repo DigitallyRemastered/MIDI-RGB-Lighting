@@ -26,12 +26,26 @@ const int LightEngine::COLOR_PHASE[64] = {
     -100, -98, -96, -92, -88, -83, -77, -71, -63, -56, -47, -38, -29, -20, -10, 0
 };
 
+// ----------------------------------------------------------------------------
+// Note-triggered mode tuning (MODE_BRIGHTNESS_SPIKE .. MODE_FIREBALL)
+// ----------------------------------------------------------------------------
+// Per-frame multiplier for the spike envelope.  At 30 fps, 0.72^9 ≈ 0.05, so a
+// Note On spike fades to ~5% in ~0.3 s — a fast, percussive snap.
+static constexpr float SPIKE_DECAY_PER_FRAME = 0.72f;
+static constexpr float SPIKE_MIN_LEVEL       = 0.01f;  // below this the envelope is cleared
+static constexpr float HUE_SPIKE_RANGE       = 85.0f;  // peak hue rotation, 0-255 units (~120°)
+// Fireball travels up the strip at constant velocity (inches/sec); harder hits go faster.
+static constexpr float FIREBALL_BASE_SPEED   = 60.0f;
+static constexpr float FIREBALL_SPEED_RANGE  = 120.0f;
+static const     int   FIREBALL_TAIL_LEN     = 10;     // LEDs in the trailing brightness fade
+
 // ============================================================================
 // Parameter Metadata
 // ============================================================================
 
 static const ParameterInfo PARAMETER_TABLE[] = {
-    { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash,5=GravityComet)"},
+    { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash,5=GravityComet,"
+                           "6=NoteGate,7=BrightnessSpike,8=SatSpike,9=HueSpike,10=Fireball)"},
     { 3, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
     { 4, "Sat Waveshape",  "Spatial waveshape for saturation"},
     { 5, "Val Waveshape",  "Spatial waveshape for brightness"}
@@ -43,7 +57,12 @@ static const ModeInfo MODE_TABLE[] = {
     {2, "Moving Dots"},
     {3, "Comets"},
     {4, "Flash"},
-    {5, "Gravity Comet"}
+    {5, "Gravity Comet"},
+    {6, "Note Gate"},
+    {7, "Brightness Spike"},
+    {8, "Saturation Spike"},
+    {9, "Hue Spike"},
+    {10, "Fireball"}
 };
 
 const ParameterInfo* getParameterInfo(int ccNumber) {
@@ -58,11 +77,11 @@ int getAllParameters(const ParameterInfo** outArray) {
 }
 
 int getModeCount() {
-    return 6;
+    return (int)(sizeof(MODE_TABLE) / sizeof(MODE_TABLE[0]));
 }
 
 const ModeInfo* getModeInfo(int modeId) {
-    if (modeId < 0 || modeId >= 6) return nullptr;
+    if (modeId < 0 || modeId >= getModeCount()) return nullptr;
     return &MODE_TABLE[modeId];
 }
 
@@ -118,6 +137,8 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
             layer.comets[ci].velocity = 0.0f;
             layer.comets[ci].note     = 0;
         }
+        layer.spikeLevel = 0.0f;
+        layer.heldCount  = 0;
     }
 
     memset(activeNotes, 0, sizeof(activeNotes));
@@ -180,7 +201,7 @@ void LightEngine::handleControlChange(uint8_t channel, uint8_t control, uint8_t 
     // CC 5 = Val Waveshape  (0-3)
     // Opacity is set via SysEx 0x07/0x08 (opacityTemporal, panelId=6).
     switch (control) {
-        case 1:  layer.mode          = value % 6;    break;
+        case 1:  layer.mode          = value % getModeCount(); break;
         case 3:  layer.hue.waveshape = value & 0x03; break;
         case 4:  layer.sat.waveshape = value & 0x03; break;
         case 5:  layer.val.waveshape = value & 0x03; break;
@@ -197,20 +218,54 @@ void LightEngine::handleNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) 
     int li = channel - 1;
     Layer& layer = layers[li];
 
-    if (layer.mode == MODE_GRAVITY_COMET) {
-        // Find a free comet slot and launch it toward the note's target LED
-        for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
-            if (!layer.comets[ci].active) {
-                int targetLed = (note < (uint8_t)numLeds) ? (int)note : (numLeds - 1);
-                float targetPos = (float)targetLed * LED_SPACING_INCHES;
-                float v0 = (targetPos > 0.0f) ? sqrtf(2.0f * GRAVITY_IN_PER_S2 * targetPos) : 0.0f;
-                layer.comets[ci].active   = true;
-                layer.comets[ci].position = 0.0f;
-                layer.comets[ci].velocity = v0;
-                layer.comets[ci].note     = note;
-                break;
+    // Track held notes for this layer's channel (NoteGate mode).  A Note On with
+    // velocity 0 is a Note Off per MIDI running status, so treat it as a release.
+    // Maintained for every mode so switching into NoteGate mid-performance is correct.
+    if (velocity > 0) { if (layer.heldCount < 255) layer.heldCount++; }
+    else if (layer.heldCount > 0) layer.heldCount--;
+
+    if (velocity == 0) return;  // the effects below trigger only on a real Note On
+
+    switch (layer.mode) {
+        case MODE_GRAVITY_COMET:
+            // Find a free comet slot and launch it toward the note's target LED
+            for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
+                if (!layer.comets[ci].active) {
+                    int targetLed = (note < (uint8_t)numLeds) ? (int)note : (numLeds - 1);
+                    float targetPos = (float)targetLed * LED_SPACING_INCHES;
+                    float v0 = (targetPos > 0.0f) ? sqrtf(2.0f * GRAVITY_IN_PER_S2 * targetPos) : 0.0f;
+                    layer.comets[ci].active   = true;
+                    layer.comets[ci].position = 0.0f;
+                    layer.comets[ci].velocity = v0;
+                    layer.comets[ci].note     = note;
+                    break;
+                }
             }
+            break;
+
+        case MODE_FIREBALL:
+            // Launch a constant-velocity comet up the strip; harder hits travel faster.
+            for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
+                if (!layer.comets[ci].active) {
+                    layer.comets[ci].active   = true;
+                    layer.comets[ci].position = 0.0f;
+                    layer.comets[ci].velocity = FIREBALL_BASE_SPEED
+                                              + (velocity / 127.0f) * FIREBALL_SPEED_RANGE;
+                    layer.comets[ci].note     = note;
+                    break;
+                }
+            }
+            break;
+
+        case MODE_BRIGHTNESS_SPIKE:
+        case MODE_SAT_SPIKE:
+        case MODE_HUE_SPIKE: {
+            float v = velocity / 127.0f;
+            if (v > layer.spikeLevel) layer.spikeLevel = v;  // retrigger takes the louder hit
+            break;
         }
+
+        default: break;
     }
 }
 
@@ -218,9 +273,14 @@ void LightEngine::handleNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
     if (note < 128) {
         activeNotes[note] = 0;
     }
-    // GravityComet comets continue under physics; they self-deactivate when
-    // they fall back to position <= 0 with negative velocity.
-    (void)channel; (void)velocity;
+    // Release a held note for this layer's channel (NoteGate mode).
+    if (channel >= 1 && channel <= 16) {
+        Layer& layer = layers[channel - 1];
+        if (layer.heldCount > 0) layer.heldCount--;
+    }
+    // GravityComet / Fireball comets keep moving under their own motion; they
+    // self-deactivate (gravity comet falls back to base, fireball burns past the top).
+    (void)velocity;
 }
 
 // ============================================================================
@@ -342,7 +402,7 @@ bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
     for (int li = 0; li < MAX_LAYERS; li++) {
         Layer& layer = layers[li];
         uint8_t m  = buf[i++];
-        layer.mode = (m < 6) ? m : (uint8_t)MODE_OFF;  // reject corrupt mode bytes
+        layer.mode = (m < getModeCount()) ? m : (uint8_t)MODE_OFF;  // reject corrupt mode bytes
         i += deserializeTC(buf + i, layer.opacityTemporal);
         i += deserializeComponent(buf + i, layer.hue);
         i += deserializeComponent(buf + i, layer.sat);
@@ -374,6 +434,11 @@ void LightEngine::render() {
         LayerEffectiveParams ep;
         applyTimeModulationForLayer(li, ep);
         effectiveOpacity[li] = ep.opacity;
+
+        // NoteGate: layer stays dark until a note is held on its channel, then
+        // shows the opacity it would otherwise have had.
+        if (layers[li].mode == MODE_NOTE_GATE && layers[li].heldCount == 0)
+            effectiveOpacity[li] = 0.0f;
 
         memset(layerBuffers[li], 0, numLeds * sizeof(HSVColor));
         renderLayer(li, layerBuffers[li], ep);
@@ -413,6 +478,11 @@ void LightEngine::renderLayer(int layerIdx, HSVColor* buf, const LayerEffectiveP
         case MODE_COMETS:        renderComets      (layerIdx, buf, ep); break;
         case MODE_FLASH:         renderFlash       (layerIdx, buf, ep); break;
         case MODE_GRAVITY_COMET: renderGravityComet(layerIdx, buf, ep); break;
+        case MODE_NOTE_GATE:     renderSolid       (layerIdx, buf, ep); break;  // gating done via effectiveOpacity
+        case MODE_BRIGHTNESS_SPIKE: renderBrightnessSpike(layerIdx, buf, ep); break;
+        case MODE_SAT_SPIKE:        renderSatSpike       (layerIdx, buf, ep); break;
+        case MODE_HUE_SPIKE:        renderHueSpike       (layerIdx, buf, ep); break;
+        case MODE_FIREBALL:         renderFireball       (layerIdx, buf, ep); break;
         default: break;
     }
 }
@@ -682,6 +752,91 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
             uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
             uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
             uint8_t v = wrap (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
+            setLED(buf, idx, h, s, v);
+        }
+    }
+}
+
+// Note-triggered transient modes ---------------------------------------------
+// All three "spike" modes render the layer's normal spatial pattern, then apply
+// a per-layer envelope that is slammed to (velocity/127) on Note On and decays
+// each frame.  spikeLevel is decayed once here per frame (renderLayer runs once
+// per layer per frame).  Brightness/saturation use clamp() so the boost saturates
+// at full rather than wrapping back to dark; hue uses wrap() since it is circular.
+
+void LightEngine::renderBrightnessSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+    Layer& layer = layers[layerIdx];
+    layer.spikeLevel *= SPIKE_DECAY_PER_FRAME;
+    if (layer.spikeLevel < SPIKE_MIN_LEVEL) layer.spikeLevel = 0.0f;
+    const float level = layer.spikeLevel;
+
+    for (int i = 0; i < numLeds; i++) {
+        uint8_t h = wrap (evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+        uint8_t s = wrap (evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+        float vbase = evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase);
+        uint8_t v = clamp(vbase + level * (254.0f - vbase));  // spike toward full brightness
+        setLED(buf, i, h, s, v);
+    }
+}
+
+void LightEngine::renderSatSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+    Layer& layer = layers[layerIdx];
+    layer.spikeLevel *= SPIKE_DECAY_PER_FRAME;
+    if (layer.spikeLevel < SPIKE_MIN_LEVEL) layer.spikeLevel = 0.0f;
+    const float level = layer.spikeLevel;
+
+    for (int i = 0; i < numLeds; i++) {
+        uint8_t h = wrap (evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+        float sbase = evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase);
+        uint8_t s = clamp(sbase + level * (254.0f - sbase));  // spike toward full saturation
+        uint8_t v = wrap (evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
+        setLED(buf, i, h, s, v);
+    }
+}
+
+void LightEngine::renderHueSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+    Layer& layer = layers[layerIdx];
+    layer.spikeLevel *= SPIKE_DECAY_PER_FRAME;
+    if (layer.spikeLevel < SPIKE_MIN_LEVEL) layer.spikeLevel = 0.0f;
+    const float hueShift = layer.spikeLevel * HUE_SPIKE_RANGE;  // rotates out and eases back
+
+    for (int i = 0; i < numLeds; i++) {
+        float hbase = evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase);
+        uint8_t h = wrap (hbase + hueShift);
+        uint8_t s = wrap (evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+        uint8_t v = wrap (evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
+        setLED(buf, i, h, s, v);
+    }
+}
+
+// Fireball: each Note On launches a comet up the strip at constant velocity
+// (see handleNoteOn).  Colour comes from the layer's own hue/sat panels; a
+// trailing tail fades the brightness so the head reads as the hottest point.
+void LightEngine::renderFireball(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+    const Layer& layer = layers[layerIdx];
+    const float dt = 1.0f / FRAME_RATE;
+
+    for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
+        CometState& comet = layers[layerIdx].comets[ci];
+        if (!comet.active) continue;
+
+        comet.position += comet.velocity * dt;  // constant upward velocity, no gravity
+        int headIdx = (int)(comet.position / LED_SPACING_INCHES);
+
+        // Burned out once the whole tail has travelled past the top of the strip.
+        if (headIdx - (FIREBALL_TAIL_LEN - 1) >= numLeds) {
+            comet.active = false;
+            continue;
+        }
+
+        for (int t = 0; t < FIREBALL_TAIL_LEN; t++) {
+            int idx = headIdx - t;
+            if (idx < 0) break;            // tail has not yet emerged from the base
+            if (idx >= numLeds) continue;  // this part of the head is past the top
+            float brightness = (float)(FIREBALL_TAIL_LEN - t) / (float)FIREBALL_TAIL_LEN;  // head brightest
+            uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+            uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+            uint8_t v = clamp(evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
             setLED(buf, idx, h, s, v);
         }
     }

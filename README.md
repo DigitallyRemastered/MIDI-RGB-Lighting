@@ -181,5 +181,5 @@ All rendering logic lives in the shared `LightEngine` library (`libraries/LightE
 
 1. Add an entry to the `LayerMode` enum in `LightEngine.h`.
 2. Implement a `renderYourMode()` function in `LightEngine.cpp` and add its `case` to the switch in `renderLayer()`.
-3. Add the mode name to `MODE_TABLE` in `LightEngine.cpp`, update `getModeCount()`, and bump the `value % 6` modulus in `handleControlChange()`.
+3. Add the mode name to `MODE_TABLE` in `LightEngine.cpp`. The mode count is derived from that table (`getModeCount()`), and `handleControlChange()` / `deserializeState()` clamp against it automatically — no magic number to bump.
 4. Rebuild and re-flash the firmware (`lights_teensy.ino` or `lights_esp32.ino`), and rebuild the DLL (`LightEngineDLL/`) if you use the plugin.
