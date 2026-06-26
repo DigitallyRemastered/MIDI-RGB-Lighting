@@ -10,6 +10,7 @@
     #include <cstdlib>
     #include <cstring>
     #include <cmath>
+    #include <ctime>
 #else
     #include <math.h>
 #endif
@@ -143,6 +144,11 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
 
     memset(activeNotes, 0, sizeof(activeNotes));
     frameCounter        = 0;
+#ifdef ARDUINO
+    randomSeed(analogRead(0));
+#else
+    srand((unsigned int)time(nullptr));
+#endif
     tempoBPM            = 120.0f;
     _saveStateRequested = false;
     _numLedsChanged     = false;
@@ -706,18 +712,19 @@ void LightEngine::renderComets(int layerIdx, HSVColor* buf, const LayerEffective
 
 void LightEngine::renderFlash(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     const Layer& layer = layers[layerIdx];
-    int randomLed;
+    int count = (int)ep.lines;
+    if (count <= 0) count = 1;
+    for (int i = 0; i < count; i++) {
 #ifdef ARDUINO
-    randomSeed(frameCounter);
-    randomLed = random(numLeds);
+        int randomLed = random(numLeds);
 #else
-    srand(frameCounter);
-    randomLed = rand() % numLeds;
+        int randomLed = rand() % numLeds;
 #endif
-    uint8_t h = wrap (evalPanel(layer.hue, randomLed, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-    uint8_t s = wrap (evalPanel(layer.sat, randomLed, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-    uint8_t v = wrap (evalPanel(layer.val, randomLed, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
-    setLED(buf, randomLed, h, s, v);
+        uint8_t h = wrap(evalPanel(layer.hue, randomLed, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+        uint8_t s = wrap(evalPanel(layer.sat, randomLed, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+        uint8_t v = wrap(evalPanel(layer.val, randomLed, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
+        setLED(buf, randomLed, h, s, v);
+    }
 }
 
 void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
