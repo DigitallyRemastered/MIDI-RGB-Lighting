@@ -1,12 +1,14 @@
 /* lights_esp32 - Arduino Firmware for RGB Lighting (ESP32 Dual-Mode MIDI Version)
- * 
+ *
  * Thin wrapper around the LightEngine class.
  * All rendering logic, constants, and state are handled by the engine.
  * This file simply forwards MIDI events and calls render() at 30Hz.
  *
- * Connections:
+ * Connections (both compiled in; choose at runtime):
  *   - rtpMIDI (AppleMIDI) over WiFi  — for PC/Mac/iOS on the same network
  *   - BLE-MIDI (NimBLE)              — for Android (and iOS as fallback)
+ * BLE advertising is paused while an rtpMIDI session is active so the C3's single
+ * 2.4GHz radio isn't time-sliced between BLE and WiFi (which drops rtpMIDI packets).
  *
  * Required libraries (Arduino Library Manager):
  *   - AppleMIDI  (lathoub/Arduino-AppleMIDI-Library)
@@ -48,8 +50,21 @@ int currentLedCount = NUM_LEDS;
 // Light engine instance (manages all state and logic)
 LightEngine engine(NUM_LEDS);
 
-// AppleMIDI instance (rtpMIDI over WiFi)
-APPLEMIDI_CREATE_DEFAULTSESSION_INSTANCE();
+// AppleMIDI instance (rtpMIDI over WiFi).
+// Custom settings: enlarge the receive buffer (DefaultSettings::MaxBufferSize is
+// 256) so a burst of preset-load SysEx can't overrun the parser while the CPU is
+// stalled inside FastLED.show().  This grows the AppleMIDI byte deques to 1024
+// each (a few KB of RAM — negligible against the C3's ~320 KB, and RAM is only
+// ~18% used).  This is exactly what APPLEMIDI_CREATE_DEFAULTSESSION_INSTANCE()
+// expands to, but with our Settings type substituted for DefaultSettings.
+struct LightsAppleMIDISettings : public APPLEMIDI_NAMESPACE::DefaultSettings {
+  static const size_t MaxBufferSize = 1024;
+};
+APPLEMIDI_NAMESPACE::AppleMIDISession<WiFiUDP, LightsAppleMIDISettings>
+    AppleMIDI("AppleMIDI-ESP32", DEFAULT_CONTROL_PORT);
+MIDI_NAMESPACE::MidiInterface<APPLEMIDI_NAMESPACE::AppleMIDISession<WiFiUDP, LightsAppleMIDISettings>,
+                              APPLEMIDI_NAMESPACE::AppleMIDISettings>
+    MIDI((APPLEMIDI_NAMESPACE::AppleMIDISession<WiFiUDP, LightsAppleMIDISettings> &) AppleMIDI);
 
 // BLE-MIDI connection state (updated from BLE callbacks)
 volatile bool bleConnected = false;
@@ -78,6 +93,32 @@ volatile uint32_t rtpSeqGaps = 0;
 // Flag set by BLE connect callback so loop() sends CC 119 on the next iteration
 // (avoids calling BLE TX from inside the NimBLE callback thread).
 static volatile bool requestSyncViaBLE = false;
+
+// rtpMIDI session state — true while a remote rtpMIDI peer (e.g. FL Studio) is
+// connected.  Used to pause BLE advertising: the ESP32-C3 shares ONE 2.4GHz radio
+// between WiFi and BLE, and BLE advertising preempts WiFi RX (= dropped rtpMIDI
+// packets).  Pausing advertising while a session is live frees the radio; it
+// resumes when the session drops so a phone can still connect.  Distinct from WiFi
+// being connected — you can be on WiFi with no rtpMIDI session.
+static volatile bool rtpSessionActive = false;
+
+// Self-healing state sync: after a preset push the plugin sends a SysEx 0x0E
+// checksum of its serialized layer region.  We hash our own layer region the same
+// way and, on mismatch (= a dropped bundle/fragment over lossy WiFi/BLE), ask the
+// plugin to resend the full state via CC 119.  Capped + rate-limited so a genuine
+// disagreement the resend can't fix (e.g. a plugin/firmware version skew) can't
+// turn into an endless request storm.
+static const uint32_t RESYNC_COOLDOWN_MS  = 500;  // min spacing between requests
+static const int      MAX_RESYNC_ATTEMPTS = 4;    // per run of consecutive mismatches
+static uint32_t lastResyncMs   = 0;
+static int      resyncAttempts = 0;
+
+// FNV-1a (32-bit) — must match the plugin's checksum of serializeState() bytes 6..end.
+static uint32_t fnv1a32(const uint8_t* p, size_t n) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+  return h;
+}
 
 // ============================================================================
 // Persistent State
@@ -154,7 +195,7 @@ void setup() {
 
   Serial.printf("[DIAG] boot  heap: %u  min-ever: %u\n",
       ESP.getFreeHeap(), ESP.getMinFreeHeap());
-  
+
   // Load persisted state first so FastLED is registered at the saved LED count
   // (the engine clamps it to [1, MAX_LEDS]; defaults to NUM_LEDS when no state).
   loadState();
@@ -188,13 +229,16 @@ void setup() {
   Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
   Serial.println("Configure rtpMIDI (Windows) or Audio MIDI Setup (Mac) to connect");
-  
+
   // --- rtpMIDI (AppleMIDI over WiFi) ---
   MIDI.begin(MIDI_CHANNEL_OMNI);
 
   AppleMIDI.setHandleConnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc, const char* name) {
     Serial.print("[rtpMIDI] Connected: ");
     Serial.println(name);
+    // Pause BLE advertising (applied in loop) so the shared 2.4GHz radio stops
+    // being time-sliced for BLE while this WiFi/rtpMIDI session is active.
+    rtpSessionActive = true;
     // Ask the plugin to push its current engine state over the newly established session.
     // CC 119 on channel 1 is the agreed "please send me your state" signal.
     MIDI.sendControlChange(119, 0, 1);
@@ -202,6 +246,8 @@ void setup() {
   });
   AppleMIDI.setHandleDisconnected([](const APPLEMIDI_NAMESPACE::ssrc_t & ssrc) {
     Serial.println("[rtpMIDI] Disconnected");
+    // Session gone — let loop() resume BLE advertising so a phone can connect.
+    rtpSessionActive = false;
   });
 
   // Log every library-detected drop/exception so they're visible on Serial.
@@ -261,7 +307,7 @@ void setup() {
   BLEMidiServer.setNoteOffCallback([](uint8_t ch, uint8_t note, uint8_t vel, uint16_t) { OnNoteOff(ch + 1, note, vel); });
   BLEMidiServer.setControlChangeCallback([](uint8_t ch, uint8_t ctrl, uint8_t val, uint16_t) { OnControlChange(ch + 1, ctrl, val); });
   BLEMidiServer.setSysExCallback([](uint8_t *data, uint16_t length, uint16_t) { OnSysEx(data, length); });
-  
+
   //ArduinoOTA
   ArduinoOTA.setHostname(BLE_DEVICE_NAME);
   ArduinoOTA.setPort(3232);  // explicit port forces mDNS to advertise it correctly
@@ -287,7 +333,55 @@ void loop() {
     BLEMidiServer.controlChange(0, 119, 0);
     Serial.println("[Sync] Sent CC 119 requesting full state from plugin (BLE)");
   }
-  
+
+  // Free the shared 2.4GHz radio for rtpMIDI: advertise BLE only when there's no
+  // rtpMIDI session AND no BLE client connected.  Re-asserted every loop so the
+  // ESP32-BLE-MIDI library's own advertising restart (it re-advertises on BLE
+  // disconnect) can't override the pause mid-session.  Cheap: NimBLE start/stop
+  // are no-ops when already in the target state, and we only call on a change.
+  {
+    static bool bleAdvertising = true;  // BLEMidiServer.begin() starts advertising
+    bool wantAdvertising = !rtpSessionActive && !bleConnected;
+    if (wantAdvertising != bleAdvertising) {
+      if (wantAdvertising) NimBLEDevice::startAdvertising();
+      else                 NimBLEDevice::stopAdvertising();
+      bleAdvertising = wantAdvertising;
+      Serial.printf("[BLE] advertising %s\n",
+          wantAdvertising ? "resumed" : "paused (rtpMIDI session active)");
+    }
+  }
+
+  // Self-healing: when the plugin's post-push checksum (SysEx 0x0E) arrives, verify
+  // our applied state matches; if a packet was lost, ask for a full resend.  The
+  // ~1.9KB serialize runs here on the loop task's stack (not the small MIDI/BLE
+  // callback stacks).
+  uint32_t peerChecksum;
+  if (engine.takePeerStateChecksum(peerChecksum)) {
+    uint8_t stateBuf[LightEngine::STATE_SIZE];
+    size_t  n = engine.serializeState(stateBuf, sizeof(stateBuf));
+    // Hash only the layer region (skip magic+version+tempo+LED-count header) so
+    // loosely-synced globals can't cause a false mismatch / resync loop.
+    uint32_t mine = (n > 6) ? fnv1a32(stateBuf + 6, n - 6) : 0;
+    if (mine == peerChecksum) {
+      resyncAttempts = 0;  // in sync — clear the attempt run
+    } else {
+      uint32_t nowMs = millis();
+      if (resyncAttempts < MAX_RESYNC_ATTEMPTS && nowMs - lastResyncMs > RESYNC_COOLDOWN_MS) {
+        lastResyncMs = nowMs;
+        resyncAttempts++;
+        Serial.printf("[Resync] state mismatch mine=%08x peer=%08x — requesting full state (%d/%d)\n",
+            mine, peerChecksum, resyncAttempts, MAX_RESYNC_ATTEMPTS);
+        MIDI.sendControlChange(119, 0, 1);            // rtpMIDI peer (no-op if none)
+        if (bleConnected) BLEMidiServer.controlChange(0, 119, 0);  // BLE peer
+      } else if (resyncAttempts >= MAX_RESYNC_ATTEMPTS) {
+        Serial.printf("[Resync] giving up after %d attempts (mine=%08x peer=%08x) — "
+                      "likely a plugin/firmware mismatch, not packet loss\n",
+            resyncAttempts, mine, peerChecksum);
+        resyncAttempts++;  // step past the cap so this logs only once per run
+      }
+    }
+  }
+
   // Render at 30Hz (every 33,333 microseconds)
   unsigned long now = micros();
   if (now - lastRender >= renderInterval) {

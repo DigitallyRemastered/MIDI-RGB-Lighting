@@ -990,6 +990,23 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             break;
         }
 
+        case 0x0E: {  // Peer state checksum: [F0, 7D, 0E, s0, s1, s2, s3, s4, F7]
+            // 32-bit FNV-1a of the sender's serialized layer region, packed as five
+            // 7-bit septets, LSB first (the top septet carries the high 4 bits).
+            // Only decoded + stored here (cheap, callback-safe); the sketch consumes
+            // it via takePeerStateChecksum(), compares, and requests a resync.
+            if (length >= (uint16_t)(offset + 7)) {
+                _peerStateChecksum =
+                      (uint32_t) (data[offset + 2] & 0x7F)
+                    | ((uint32_t)(data[offset + 3] & 0x7F) << 7)
+                    | ((uint32_t)(data[offset + 4] & 0x7F) << 14)
+                    | ((uint32_t)(data[offset + 5] & 0x7F) << 21)
+                    | ((uint32_t)(data[offset + 6] & 0x0F) << 28);
+                _peerStateChecksumPend = true;
+            }
+            break;
+        }
+
         case 0x08:  // Single panel TemporalConfig field
             // [F0, 7D, 08, layerIdx, panelId, paramId, wfField, value, F7]
             // wfField: 0=profile, 1=amplitude, 2=offset, 3=phaseL, 4=phaseH,
@@ -1111,6 +1128,15 @@ void LightEngine::handleStateSyncFragment(const uint8_t* frag, uint16_t len) {
 bool LightEngine::saveStateRequested() {
     if (_saveStateRequested) {
         _saveStateRequested = false;
+        return true;
+    }
+    return false;
+}
+
+bool LightEngine::takePeerStateChecksum(uint32_t& out) {
+    if (_peerStateChecksumPend) {
+        _peerStateChecksumPend = false;
+        out = _peerStateChecksum;
         return true;
     }
     return false;

@@ -279,6 +279,17 @@ public:
     /** Returns true (and clears the flag) if a save-state SysEx (0x06) was received. */
     bool saveStateRequested();
 
+    /**
+     * Returns true once (and clears the pending flag) if a peer state-checksum
+     * SysEx (0x0E) has arrived, writing the decoded expected checksum to `out`.
+     * The caller compares it against its own FNV-1a hash of the serialized layer
+     * region (serializeState() bytes 6..STATE_SIZE — i.e. the 16 layers, excluding
+     * the loosely-synced magic/tempo/LED-count header) and requests a resync
+     * (CC 119) on mismatch.  Comparison + resync policy live in the firmware sketch,
+     * not here, so this method stays platform-agnostic.
+     */
+    bool takePeerStateChecksum(uint32_t& out);
+
 private:
     // ========================================================================
     // LED Buffers
@@ -323,6 +334,11 @@ private:
     bool _saveStateRequested = false;
     bool _numLedsChanged     = false;
     bool lightsEnabled       = true;   // master enable — render() outputs black when false
+
+    // SysEx 0x0E peer state checksum: decoded expected layer-region hash from the
+    // plugin, set in handleSysEx and consumed once by takePeerStateChecksum().
+    uint32_t _peerStateChecksum    = 0;
+    bool     _peerStateChecksumPend = false;
 
     // ========================================================================
     // SysEx 0x0A full-state sync reassembly
