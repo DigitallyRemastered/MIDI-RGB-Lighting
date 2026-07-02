@@ -79,6 +79,55 @@ install(FILES ${ARDUINO_LIGHT_ENGINE_DIR}/LightEngine.h
     DESTINATION include
 )
 
+# ============================================================================
+# Unit Tests (Catch2 via FetchContent — off by default in production builds)
+# ============================================================================
+option(LIGHT_ENGINE_BUILD_TESTS "Build LightEngine unit tests" ON)
+
+if(LIGHT_ENGINE_BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG        v3.7.1
+    )
+    FetchContent_MakeAvailable(Catch2)
+
+    # Compile the engine sources directly into the test binary (no DLL export
+    # macro, so the C++ class API is accessible without function pointers).
+    add_executable(LightEngineTests
+        tests/test_light_engine.cpp
+        ${ARDUINO_LIGHT_ENGINE_DIR}/LightEngine.cpp
+    )
+
+    target_include_directories(LightEngineTests
+        PRIVATE
+            ${ARDUINO_LIGHT_ENGINE_DIR}
+    )
+
+    target_link_libraries(LightEngineTests
+        PRIVATE
+            Catch2::Catch2WithMain
+    )
+
+    target_compile_options(LightEngineTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W3 /wd4996>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wno-unused-parameter>
+    )
+
+    target_compile_definitions(LightEngineTests PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>
+    )
+
+    include(CTest)
+    enable_testing()
+
+    # catch_discover_tests requires the cmake extras from Catch2's source tree
+    list(APPEND CMAKE_MODULE_PATH "${catch2_SOURCE_DIR}/extras")
+    include(Catch)
+    catch_discover_tests(LightEngineTests)
+endif()
+
 # Print configuration info
 message(STATUS "Light Engine DLL Configuration:")
 message(STATUS "  Source Directory: ${ARDUINO_LIGHT_ENGINE_DIR}")
