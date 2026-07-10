@@ -60,7 +60,7 @@ struct TemporalConfig {
     uint8_t  amplitude;    // 0-127: oscillation magnitude
     uint8_t  offset;       // 0-127: base value (static value when amplitude = 0)
     uint16_t phaseShift;   // 0-16383: frame offset for phase alignment
-    uint8_t  period;       // 1-127: number of beats per cycle
+    uint8_t  period;       // 0-127: index into the note-division table (see LightEngine::periodIndexToBeats)
     bool     direction;    // true = forward, false = reverse
 };
 
@@ -141,6 +141,12 @@ struct Layer {
 class LightEngine {
 public:
     static const int MAX_LEDS = 1000;  // Maximum LED buffer size (allocated once)
+
+    // Map a TemporalConfig.period index (0-127) to the oscillation period in beats.
+    // Indices 0-16 are musical note divisions (triplet/dotted/straight, sorted by
+    // duration); 17-127 are whole beats 5..115. See PERIOD_BEATS[] in LightEngine.cpp.
+    // The plugin's period label mirrors this table (TemporalConfigWidget).
+    static float periodIndexToBeats(uint8_t index);
 
     LightEngine(int numLeds = 108);
     ~LightEngine();
@@ -419,9 +425,21 @@ struct ParameterInfo {
     const char* tooltip;
 };
 
+// Which of the three "mask" temporal targets actually affect a mode's output.
+// Opacity is deliberately absent: it is the layer blend weight and applies to
+// every mode, so editors should always offer it.  Lines / Offset / Length only
+// contribute to the LED color for the motion modes that read them (see the
+// renderers in LightEngine.cpp), so an editor can hide the irrelevant ones.
+enum MaskParamFlags {
+    MASK_PARAM_LINES  = 1 << 0,  // number of parallel lines (or flash count)
+    MASK_PARAM_OFFSET = 1 << 1,  // motion start-LED offset
+    MASK_PARAM_LENGTH = 1 << 2   // motion segment length
+};
+
 struct ModeInfo {
     int         id;
     const char* name;
+    uint8_t     maskParams;   // OR of MaskParamFlags — mask targets this mode uses
 };
 
 // Get parameter metadata for CC 1-19 (returns nullptr if out of range)
@@ -494,6 +512,10 @@ LIGHT_ENGINE_EXPORT const char* lightEngine_getParameterTooltip(int ccNumber);
 
 LIGHT_ENGINE_EXPORT int         lightEngine_getModeCount();
 LIGHT_ENGINE_EXPORT const char* lightEngine_getModeName (int modeId);
+
+// OR of MaskParamFlags for the given mode (0 if out of range).  Lets the plugin
+// show only the mask targets that affect the selected mode.
+LIGHT_ENGINE_EXPORT int         lightEngine_getModeMaskParams(int modeId);
 
 #ifdef __cplusplus
 }

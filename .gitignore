@@ -1,5 +1,9 @@
-# Credentials — never commit these
+# Credentials — never commit these (any sketch folder)
+secrets.h
 Source/lights_esp32/secrets.h
+
+# OTA firmware build output (regenerate via arduino-cli; see SETUP_INSTRUCTIONS.md)
+Release/firmware/
 
 # Build directories
 build/
@@ -129,3 +133,7 @@ $RECYCLE.BIN/
 # Package managers
 vcpkg_installed/
 conan/
+
+# Python
+__pycache__/
+*.pyc

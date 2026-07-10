@@ -43,7 +43,7 @@ static void setOpacity(LightEngine& engine, uint8_t layerIdx, uint8_t offset)
         0,      // amplitude = 0 (static)
         offset, // base opacity value
         0, 0,   // phaseShift = 0
-        4,      // period = 4 beats
+        4,      // period index (unused here: amplitude = 0 -> static)
         1       // direction = forward
     });
     engine.handleSysEx(msg.data(), static_cast<uint16_t>(msg.size()));

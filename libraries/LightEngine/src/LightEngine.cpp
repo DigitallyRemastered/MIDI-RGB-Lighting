@@ -52,18 +52,23 @@ static const ParameterInfo PARAMETER_TABLE[] = {
     { 5, "Val Waveshape",  "Spatial waveshape for brightness"}
 };
 
+// maskParams: which of Lines/Offset/Length feed into the mode's LED color.
+// Opacity is omitted intentionally — it is the layer blend weight and applies
+// to every mode.  Keep these in sync with the renderers below: only MovingDots
+// and Comets read all three; Flash reads only Lines (as its flash count); every
+// other mode ignores all three.
 static const ModeInfo MODE_TABLE[] = {
-    {0, "Off"},
-    {1, "Solid"},
-    {2, "Moving Dots"},
-    {3, "Comets"},
-    {4, "Flash"},
-    {5, "Gravity Comet"},
-    {6, "Note Gate"},
-    {7, "Brightness Spike"},
-    {8, "Saturation Spike"},
-    {9, "Hue Spike"},
-    {10, "Fireball"}
+    {0,  "Off",              0},
+    {1,  "Solid",            0},
+    {2,  "Moving Dots",      MASK_PARAM_LINES | MASK_PARAM_OFFSET | MASK_PARAM_LENGTH},
+    {3,  "Comets",           MASK_PARAM_LINES | MASK_PARAM_OFFSET | MASK_PARAM_LENGTH},
+    {4,  "Flash",            MASK_PARAM_LINES},
+    {5,  "Gravity Comet",    0},
+    {6,  "Note Gate",        0},
+    {7,  "Brightness Spike", 0},
+    {8,  "Saturation Spike", 0},
+    {9,  "Hue Spike",        0},
+    {10, "Fireball",         0}
 };
 
 const ParameterInfo* getParameterInfo(int ccNumber) {
@@ -103,7 +108,7 @@ static void initTemporalConfig(TemporalConfig& tc) {
     tc.amplitude  = 0;
     tc.offset     = 0;     // caller sets meaningful default after this
     tc.phaseShift = 0;
-    tc.period     = 4;
+    tc.period     = 10;    // note-division index 10 = 1/4 note (1 beat); see periodIndexToBeats
     tc.direction  = true;
 }
 
@@ -332,7 +337,7 @@ static size_t deserializeTC(const uint8_t* buf, TemporalConfig& tc) {
     tc.amplitude  = buf[1];
     tc.offset     = buf[2];
     tc.phaseShift = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
-    tc.period     = (buf[5] > 0) ? buf[5] : 1;
+    tc.period     = buf[5];   // 0-127 note-division index (0 is valid)
     tc.direction  = buf[6] != 0;
     return 7;
 }
@@ -575,12 +580,41 @@ float LightEngine::evaluateTemporalWaveform(int profile, float phase, bool direc
     }
 }
 
+// Map a period index (0-127) to the oscillation period in beats. Indices 0-16 are
+// musical note divisions (triplet = x2/3, dotted = x1.5), sorted by duration; 17-127
+// are whole beats 5..115. Keep in sync with the plugin's period label table
+// (TemporalConfigWidget). See LightEngine.h for the field comment.
+float LightEngine::periodIndexToBeats(uint8_t index) {
+    index &= 0x7F;  // 7-bit MIDI domain; also guards the table bounds below
+    static const float kNoteBeats[17] = {
+        0.083333f, // 0  1/32 triplet
+        0.125f,    // 1  1/32
+        0.166667f, // 2  1/16 triplet
+        0.1875f,   // 3  dotted 1/32
+        0.25f,     // 4  1/16
+        0.333333f, // 5  1/8 triplet
+        0.375f,    // 6  dotted 1/16
+        0.5f,      // 7  1/8
+        0.666667f, // 8  1/4 triplet
+        0.75f,     // 9  dotted 1/8
+        1.0f,      // 10 1/4  (quarter note = 1 beat)
+        1.333333f, // 11 1/2 triplet
+        1.5f,      // 12 dotted 1/4
+        2.0f,      // 13 1/2
+        2.666667f, // 14 1/1 triplet
+        3.0f,      // 15 dotted 1/2
+        4.0f       // 16 1/1  (whole note = 4 beats)
+    };
+    if (index <= 16) return kNoteBeats[index];
+    return (float)(index - 12);  // 17 -> 5 beats ... 127 -> 115 beats
+}
+
 // Apply a TemporalConfig to produce a time-varying float in 0-127 range.
 // TC.offset is the static base; TC.amplitude adds oscillation per DAW tempo.
 float LightEngine::applyTemporalConfig(const TemporalConfig& tc) const {
     if (tc.amplitude == 0) return (float)tc.offset;  // fast path: flat
 
-    float framesPerPeriod = (tc.period * 60.0f * FRAME_RATE) / tempoBPM;
+    float framesPerPeriod = (periodIndexToBeats(tc.period) * 60.0f * FRAME_RATE) / tempoBPM;
     if (framesPerPeriod < 1.0f) framesPerPeriod = 1.0f;
 
     float shiftedFrame = fmod((float)frameCounter + (float)tc.phaseShift, framesPerPeriod);
@@ -941,7 +975,7 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
                     tc->amplitude  = data[offset + 6];
                     tc->offset     = data[offset + 7];
                     tc->phaseShift = (uint16_t)data[offset + 8] | ((uint16_t)data[offset + 9] << 7);
-                    tc->period     = (data[offset + 10] > 0) ? data[offset + 10] : 1;
+                    tc->period     = data[offset + 10];   // 0-127 note-division index (0 is valid)
                     tc->direction  = data[offset + 11] != 0;
                 }
             }
@@ -975,7 +1009,7 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
                         tc->amplitude  = p[1];
                         tc->offset     = p[2];
                         tc->phaseShift = (uint16_t)p[3] | ((uint16_t)p[4] << 7);
-                        tc->period     = (p[5] > 0) ? p[5] : 1;
+                        tc->period     = p[5];   // 0-127 note-division index (0 is valid)
                         tc->direction  = p[6] != 0;
                     }
                 }
@@ -1026,7 +1060,7 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
                         case 2: tc->offset     = value; break;
                         case 3: tc->phaseShift = (tc->phaseShift & 0x3F80) | value; break;
                         case 4: tc->phaseShift = (tc->phaseShift & 0x007F) | ((uint16_t)value << 7); break;
-                        case 5: tc->period     = (value > 0) ? value : 1; break;
+                        case 5: tc->period     = value; break;   // 0-127 note-division index (0 is valid)
                         case 6: tc->direction  = (value != 0); break;
                     }
                 }
@@ -1239,6 +1273,11 @@ int lightEngine_getModeCount() {
 const char* lightEngine_getModeName(int modeId) {
     const ModeInfo* info = getModeInfo(modeId);
     return info ? info->name : "";
+}
+
+int lightEngine_getModeMaskParams(int modeId) {
+    const ModeInfo* info = getModeInfo(modeId);
+    return info ? info->maskParams : 0;
 }
 
 } // extern "C"

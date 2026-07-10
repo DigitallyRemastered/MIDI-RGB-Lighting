@@ -1,152 +1,208 @@
-# LightEngine Library - First Time Setup
+# LightEngine / Lights ESP32 — Setup & Fleet Flashing
 
-## Prerequisites
+This covers building the ESP32-C3 firmware with **arduino-cli** and flashing a
+whole fleet of boards over WiFi with **ArduinoOTA**. Because each board now loads
+its BLE/OTA name from non-volatile memory at boot (set at runtime from the Light
+Studio plugin via SysEx `0x0F`), **one firmware binary works for every board** —
+no per-board recompile.
 
-1. Install Arduino IDE 2.x from https://www.arduino.cc/en/software
-2. Install required libraries via **Tools → Manage Libraries**:
-   - `FastLED` (for all versions)
-   - `AppleMIDI` by lathoub (for ESP32 only)
-
-## Step 1: Link Library to Arduino IDE
-
-The LightEngine is in `libraries/LightEngine/` but Arduino IDE needs to see it in its libraries folder. We use a symbolic link to keep it in Git while making it available to Arduino.
-
-### Windows
-
-1. **Right-click PowerShell** and select **"Run as Administrator"**
-2. Navigate to this repo:
-   ```powershell
-   cd "D:\Code\Lights\MIDI-RGB-Lighting"
-   ```
-3. Run the setup script:
-   ```powershell
-   .\setup_library.ps1
-   ```
-4. **Restart Arduino IDE**
-
-### Mac/Linux
-
-```bash
-ln -s "$(pwd)/libraries/LightEngine" ~/Documents/Arduino/libraries/LightEngine
-```
-
-## Step 2: Verify Installation
-
-1. Open Arduino IDE
-2. Go to **Sketch → Include Library**
-3. You should see **LightEngine** in the list
-
-## Step 3: Open Your Sketch
-
-### For Teensy (USB-MIDI):
-- Open `Source/lights_teensy/lights_teensy.ino`
-- Select **Tools → Board → Teensy 3.6** (or your Teensy model)
-- Select **Tools → USB Type → MIDI**
-- Upload
-
-### For ESP32 (WiFi-MIDI):
-- First, install ESP32 board support:
-  - **File → Preferences** → Add URL:
-    ```
-    https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-    ```
-  - **Tools → Board → Boards Manager** → Install "esp32"
-- Open `Source/lights_esp32/lights_esp32.ino`
-- **Update WiFi credentials** in the sketch (lines 17-18)
-- Select **Tools → Board → XIAO_ESP32S3** (or your ESP32 board)
-- Upload
+- **Target board:** Nologo ESP32-C3 Super Mini (`esp32:esp32:esp32c3` is fine for
+  building; the exact board id is `esp32:esp32:nologo_esp32c3_super_mini`).
+- **Toolchain:** `arduino-cli` (1.5+) with the `esp32` core installed.
 
 ---
 
-## ESP32 Out-of-the-Box Setup (WiFi-MIDI)
+## 1. One-time toolchain setup
 
-Follow these steps to get the ESP32 connected to Light Studio over the network.
+### 1a. Install arduino-cli + ESP32 core
 
-### 1. Install ESP32 Board Support
-
-In Arduino IDE:
-1. **File → Preferences** → add this URL to "Additional boards manager URLs":
-   ```
-   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-   ```
-2. **Tools → Board → Boards Manager** → search "esp32" → Install **"esp32 by Espressif Systems"**
-
-### 2. Install Required Libraries
-
-**Tools → Manage Libraries**, install:
-- `FastLED`
-- `AppleMIDI` by lathoub
-- `MIDI Library` by lathoub (dependency of AppleMIDI)
-
-### 3. Configure the Sketch
-
-Open `Source/lights_esp32/lights_esp32.ino` and update the WiFi credentials near the top:
-```cpp
-const char* ssid = "YourNetworkName";
-const char* password = "YourPassword";
+```powershell
+# core (once):
+arduino-cli config init                     # if you have no config yet
+arduino-cli config add board_manager.additional_urls `
+  https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+arduino-cli core update-index
+arduino-cli core install esp32:esp32
 ```
 
-Also set `NUM_LEDS` to your strip length and `DATA_PIN` to the GPIO pin connected to the strip's data line.
+### 1b. Libraries
 
-> **BLE-MIDI alternative**: The ESP32 sketch also supports BLE-MIDI (Bluetooth Low Energy). If your DAW supports BLE-MIDI you can skip the WiFi/rtpMIDI steps entirely and connect wirelessly without a network.
+Repo-local libraries (`LightEngine`, `ESP32-BLE-MIDI`, `NimBLE-Arduino`) live in
+`libraries/` and are passed with `--libraries`. **AppleMIDI** and **FastLED** must
+live in a second directory you also pass with `--libraries`. On this machine that
+is `C:\Users\sandm\Documents\Arduino\libraries` (the exact path used in the build
+command below).
 
-### 4. Upload
+```powershell
+# Install into that directory. Note: `arduino-cli lib install` places libraries
+# in `arduino-cli config get directories.user`\libraries — if that differs from
+# the path you pass to --libraries, copy them over or just point --libraries at
+# wherever they landed.
+arduino-cli lib install "FastLED" "AppleMIDI"
+```
 
-1. Plug in the ESP32 via USB
-2. **Tools → Board** → select your ESP32 board (e.g. **XIAO_ESP32S3**, **ESP32 Dev Module**)
-3. **Tools → Port** → select the COM port for the ESP32
-4. Click **Upload**
+> The build always works as long as both `--libraries` paths (repo `libraries/`
+> **and** the AppleMIDI/FastLED dir) are on the command line — that's why the
+> commands below pass two `--libraries` flags.
 
-### 5. Find the ESP32's IP Address
+### 1c. WiFi credentials
 
-After uploading:
-1. Open **Tools → Serial Monitor** (set baud to **115200**)
-2. Press the reset button on the ESP32
-3. Watch for output like:
-   ```
-   WiFi Connected!
-   IP Address: 192.168.1.XXX
-   ```
-   Note this IP address — you'll need it for rtpMIDI.
+Copy `Source/lights_esp32/secrets.h.example` → `secrets.h` and fill in your
+network (git-ignored). Do the same for `Source/lights_ota_bootstrap/` if you use
+the bootstrap sketch. All boards must be on the **same network** for OTA/rtpMIDI.
 
-### 6. Install rtpMIDI (Windows)
+---
 
-1. Download and install **rtpMIDI** by Tobias Erichsen from:
+## 2. Build the firmware (arduino-cli)
+
+The ESP32-C3's default OTA partition slot is only 1.25 MB and the firmware fills
+99% of it. We use the **min_spiffs** layout (1.875 MB app, still dual-OTA) via a
+sketch-local `partitions.csv` (already committed in `Source/lights_esp32/`). The
+core honors it automatically. You **also** must raise the size-check gate with
+`--build-property upload.maximum_size=1966080`, otherwise arduino-cli still
+rejects anything over 1.25 MB even though it physically fits.
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32c3 `
+  --libraries "D:\Code\Lights\MIDI-RGB-Lighting\libraries" `
+  --libraries "C:\Users\sandm\Documents\Arduino\libraries" `
+  --build-property upload.maximum_size=1966080 `
+  --output-dir "D:\Code\Lights\MIDI-RGB-Lighting\Release\firmware" `
+  "D:\Code\Lights\MIDI-RGB-Lighting\Source\lights_esp32"
+```
+
+Expected: `Sketch uses 1302713 bytes (66%) of program storage space. Maximum is
+1966080 bytes.`
+
+### Output artifacts (`Release/firmware/`)
+
+| File | What it is | Used for |
+|------|------------|----------|
+| **`lights_esp32.ino.bin`** | app image (~1.27 MB) | **OTA uploads (espota)** |
+| `lights_esp32.ino.merged.bin` | full 4 MB flash image | one-shot USB flash via esptool |
+| `lights_esp32.ino.bootloader.bin` / `.partitions.bin` | bootloader / partition table | USB flash internals |
+
+> There is no file literally named `firmware.bin` — the OTA image is
+> **`lights_esp32.ino.bin`**. `Release/ota_upload.py` defaults to that path.
+
+---
+
+## 3. Initial USB flash (per board, once)
+
+A board must already be running ArduinoOTA-capable firmware before it can be
+updated wirelessly. You have two options for the very first flash:
+
+### Option A — flash the real firmware directly
+```powershell
+arduino-cli upload --fqbn esp32:esp32:esp32c3 -p COM13 `
+  --input-dir "D:\Code\Lights\MIDI-RGB-Lighting\Release\firmware"
+```
+
+### Option B — flash the tiny bootstrap sketch first (faster per board)
+`Source/lights_ota_bootstrap/` is a minimal WiFi + ArduinoOTA sketch that
+compiles and USB-uploads slightly faster. Flash it to every board, then push the real
+firmware to all of them **in parallel** over WiFi (step 4). It ships the **same
+min_spiffs `partitions.csv`**, so the partition table it lays down is big enough
+for the real firmware's later OTA push.
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32c3 `
+  --libraries "C:\Users\sandm\Documents\Arduino\libraries" `
+  "D:\Code\Lights\MIDI-RGB-Lighting\Source\lights_ota_bootstrap"
+arduino-cli upload --fqbn esp32:esp32:esp32c3 -p COM13 `
+  "D:\Code\Lights\MIDI-RGB-Lighting\Source\lights_ota_bootstrap"
+```
+
+Either way, each board comes up on WiFi advertising itself over mDNS as
+**`Lights-XXXX.local`** (`XXXX` = last two MAC octets), unique per board.
+
+---
+
+## 4. Fleet OTA upload (all boards at once)
+
+`Release/ota_upload.py` runs the ESP32 core's `espota.py` against many boards
+concurrently (stdlib only — no pip installs). Auto-discovers `espota.py` from the
+installed core; override with the `ESPOTA` env var.
+
+```powershell
+# by IP:
+python Release\ota_upload.py Release\firmware\lights_esp32.ino.bin `
+  --targets 192.168.1.101 192.168.1.102 192.168.1.103
+
+# by mDNS hostname (needs Bonjour/mDNS resolution on the host):
+python Release\ota_upload.py --targets Lights-9A2F.local Lights-1C7E.local
+
+# from a file (one IP/hostname per line, '#' comments ok):
+python Release\ota_upload.py --targets-file boards.txt
+```
+
+It prints a per-board `[OK]/[FAIL]` line with timing and exits non-zero if any
+board failed. Tune concurrency with `--jobs N` (default 8). ~10 boards in
+parallel is comfortable on a normal network; 50+ starts to saturate WiFi.
+
+---
+
+## 5. Name each board (Light Studio plugin)
+
+Fresh boards default to `Lights-XXXX`. To give one a friendly name:
+
+1. Connect the plugin to **one** board (rtpMIDI or BLE).
+2. **File → Set Board Name…**, type a name (e.g. `Stage Left`).
+3. The board saves it to NVS and **reboots** into the new name (BLE scan list +
+   mDNS hostname). Reconnect under the new name, then move to the next board.
+
+The rename targets whichever board the plugin is connected to, so rename boards
+**one connection at a time**.
+
+---
+
+## 6. Connect Light Studio over the network (rtpMIDI, Windows)
+
+1. Install **rtpMIDI** by Tobias Erichsen:
    `https://www.tobias-erichsen.de/software/rtpmidi.html`
-2. Open rtpMIDI
-3. Under **"My Sessions"**, click **+** to create a new session (e.g. "Light Studio")
-4. Under **"Directory"**, click **+** to add a remote participant:
-   - **Address:** the ESP32's IP address (from Serial Monitor)
-   - **Port:** `5004`
-5. Click **Connect** — the ESP32 Serial Monitor should print `MIDI Connected to: ...`
+2. Create a session under **My Sessions** (e.g. "Light Studio").
+3. Under **Directory**, add each board: **Address** = board IP, **Port** `5004`,
+   then **Connect**.
+4. In Light Studio, select the rtpMIDI virtual port as the MIDI output. Notes,
+   CCs, and SysEx now route Light Studio → rtpMIDI → ESP32 → LED strip.
 
-### 7. Configure Light Studio
-
-In Light Studio (the JUCE plugin), select the rtpMIDI virtual port (the session name you created in step 6) as the MIDI output device. MIDI notes, CCs, and SysEx will now route from Light Studio → rtpMIDI → ESP32 → LED strip.
+> **BLE-MIDI alternative:** the firmware is dual-mode. If your host supports
+> BLE-MIDI you can pair directly and skip rtpMIDI. (BLE advertising is paused
+> while an rtpMIDI session is active so the C3's single radio isn't time-sliced.)
 
 ---
 
-## Done!
+## 7. Teensy build (USB-MIDI)
 
-Both sketches now use `#include <LightEngine.h>` and Arduino IDE will find the library.
+```powershell
+arduino-cli compile --fqbn teensy:avr:teensy41:usb=midi `
+  --libraries "D:\Code\Lights\MIDI-RGB-Lighting\libraries" `
+  --libraries "C:\Users\sandm\Documents\Arduino\libraries" `
+  "D:\Code\Lights\MIDI-RGB-Lighting\Source\lights_teensy"
+```
 
-**To update the library**: Just edit files in `libraries/LightEngine/src/` - changes apply to both versions immediately!
+`usb=midi` is required or `usbMIDI` is undeclared. Teensy state persists to EEPROM
+on SysEx `0x06`.
+
+---
 
 ## Troubleshooting
 
-**"LightEngine.h: No such file or directory"**
-- Ensure you ran setup script as Administrator
-- Verify symlink exists:
-  ```powershell
-  ls "$env:USERPROFILE\Documents\Arduino\libraries"
-  ```
-  Should show `LightEngine` folder
-- Restart Arduino IDE
+**OTA fails with "Not Enough Space"** — the board was USB-flashed with the default
+1.25 MB partition, too small for the ~1.3 MB firmware. Re-flash over USB once with
+the min_spiffs `partitions.csv` in the sketch folder (both `lights_esp32` and
+`lights_ota_bootstrap` already include it), then OTA works.
 
-**Setup script fails**
-- Must run PowerShell as Administrator
-- Windows may block execution - run:
-  ```powershell
-  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-  ```
-- Then run setup script again
+**Sketch too big at 99% / "text section exceeds available space"** — you omitted
+`--build-property upload.maximum_size=1966080`. The `partitions.csv` sets the
+table but not the CLI/IDE size gate.
+
+**`AppleMIDI.h: No such file or directory`** — install FastLED + AppleMIDI into
+`~/Documents/Arduino/libraries` (step 1b), and confirm both `--libraries` paths
+are passed.
+
+**`espota.py not found`** — set `ESPOTA` to its full path, e.g.
+`%LOCALAPPDATA%\Arduino15\packages\esp32\hardware\esp32\<ver>\tools\espota.py`.
+
+**Board not reachable for OTA** — confirm it's on WiFi (serial at 115200 prints
+`Lights-XXXX ready for OTA at <ip>`), on the same subnet, and not asleep.

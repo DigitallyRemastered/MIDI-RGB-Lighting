@@ -33,7 +33,15 @@
                            // count is runtime-changeable (SysEx 0x09 / state sync) and
                            // persists in the saved engine state.
 #define DATA_PIN 2  // GPIO 2 (safer than GPIO 0 on ESP32)
-#define BLE_DEVICE_NAME "DR Perform 3"  // shown in Bluetooth scan lists
+
+// Device name shown in BLE scan lists and used as the ArduinoOTA/mDNS hostname.
+// This is NO LONGER a compile-time constant: it is loaded from NVS at boot by
+// loadDeviceName() so one firmware binary can be flashed to every board.  Boards
+// with no stored name fall back to "Lights-XXXX" (last two MAC octets) so each
+// unprovisioned board is still uniquely addressable.  Set it at runtime via
+// SysEx 0x0F from the plugin (which then reboots the board into the new name).
+#define DEFAULT_NAME_PREFIX "Lights"
+char deviceName[32] = DEFAULT_NAME_PREFIX;  // populated by loadDeviceName() in setup()
 
 // ============================================================================
 // Hardware Setup
@@ -153,6 +161,31 @@ void loadState() {
   prefs.end();
 }
 
+// Load the persistent device name into the global `deviceName`.  If none is
+// stored, derive a unique default from the last two octets of the factory MAC
+// so identical firmware still yields a distinct name per board.
+void loadDeviceName() {
+  prefs.begin("lights", true);
+  String stored = prefs.getString("name", "");
+  prefs.end();
+  if (stored.length() > 0) {
+    stored.toCharArray(deviceName, sizeof(deviceName));
+  } else {
+    // High 16 bits of the 48-bit eFuse MAC = the two most device-unique octets.
+    uint16_t suffix = (uint16_t)(ESP.getEfuseMac() >> 32);
+    snprintf(deviceName, sizeof(deviceName), DEFAULT_NAME_PREFIX "-%04X", suffix);
+  }
+}
+
+// Persist a new device name (takes effect on the next boot — the BLE advertising
+// name and mDNS hostname are latched at begin() time).
+void saveDeviceName(const char* name) {
+  prefs.begin("lights", false);
+  prefs.putString("name", name);
+  prefs.end();
+  Serial.printf("Device name saved: %s\n", name);
+}
+
 // ============================================================================
 // Startup Animation
 // ============================================================================
@@ -195,6 +228,11 @@ void setup() {
 
   Serial.printf("[DIAG] boot  heap: %u  min-ever: %u\n",
       ESP.getFreeHeap(), ESP.getMinFreeHeap());
+
+  // Resolve the runtime device name (NVS override or MAC-suffixed default) before
+  // BLE and OTA start, since both latch the name at begin() time.
+  loadDeviceName();
+  Serial.printf("[DIAG] device name: %s\n", deviceName);
 
   // Load persisted state first so FastLED is registered at the saved LED count
   // (the engine clamps it to [1, MAX_LEDS]; defaults to NUM_LEDS when no state).
@@ -284,7 +322,7 @@ void setup() {
   MIDI.setHandleSystemExclusive(OnSysEx);
 
   // --- BLE-MIDI (NimBLE) ---
-  BLEMidiServer.begin(BLE_DEVICE_NAME);
+  BLEMidiServer.begin(deviceName);
   BLEMidiServer.enableDebugging(Serial);  // Print raw packet bytes to serial for diagnostics
 
   BLEMidiServer.setOnConnectCallback([]() {
@@ -309,7 +347,7 @@ void setup() {
   BLEMidiServer.setSysExCallback([](uint8_t *data, uint16_t length, uint16_t) { OnSysEx(data, length); });
 
   //ArduinoOTA
-  ArduinoOTA.setHostname(BLE_DEVICE_NAME);
+  ArduinoOTA.setHostname(deviceName);
   ArduinoOTA.setPort(3232);  // explicit port forces mDNS to advertise it correctly
   ArduinoOTA.begin();
 
@@ -441,6 +479,20 @@ void OnControlChange(byte channel, byte control, byte value) {
   engine.handleControlChange(channel, control, value);
 }
 
+// SysEx 0x0F: set persistent device name.  `nameBytes` points at the ASCII name
+// payload (the bytes between the 0x0F command byte and the trailing 0xF7).
+// Persists to NVS and reboots so the new name takes effect on BLE and mDNS.
+void applyDeviceNameSysEx(const byte* nameBytes, int n) {
+  if (n <= 0) return;
+  char name[32] = {0};
+  if (n > (int)sizeof(name) - 1) n = sizeof(name) - 1;
+  memcpy(name, nameBytes, n);
+  saveDeviceName(name);
+  Serial.printf("Rebooting into new device name '%s'...\n", name);
+  delay(50);          // let the serial line and any BLE ACK flush
+  ESP.restart();
+}
+
 void OnSysEx(byte* data, unsigned int length) {
   // Different MIDI transports deliver different framing:
   //   rtpMIDI (Arduino MIDI Library) includes 0xF0/0xF7 in the callback data.
@@ -455,6 +507,8 @@ void OnSysEx(byte* data, unsigned int length) {
     // Already framed — pass directly (rtpMIDI path)
     // SysEx 0x0D: global brightness [F0, 7D, 0D, value, F7]
     if (length >= 5 && data[2] == 0x0D) { FastLED.setBrightness(data[3]); return; }
+    // SysEx 0x0F: set device name [F0, 7D, 0F, <ascii>, F7] — payload is data[3..len-2]
+    if (length >= 5 && data[2] == 0x0F) { applyDeviceNameSysEx(data + 3, (int)length - 4); return; }
     engine.handleSysEx(data, length);
   } else if (length <= 254) {
     // Unframed — reconstruct framing (BLE-MIDI path)
@@ -464,6 +518,8 @@ void OnSysEx(byte* data, unsigned int length) {
     framedData[length + 1] = 0xF7;
     // SysEx 0x0D: global brightness [F0, 7D, 0D, value, F7]
     if ((length + 2) >= 5 && framedData[2] == 0x0D) { FastLED.setBrightness(framedData[3]); return; }
+    // SysEx 0x0F: set device name — payload is framedData[3..(length+2)-2] == data[2..length-1]
+    if ((length + 2) >= 5 && framedData[2] == 0x0F) { applyDeviceNameSysEx(framedData + 3, (int)length - 2); return; }
     engine.handleSysEx(framedData, length + 2);
   }
 
