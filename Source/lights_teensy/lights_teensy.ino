@@ -136,9 +136,13 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
-  engine.handleControlChange(channel, control, value);
-  // Debug output
-  Serial.print("CC received:");
+  // Intentionally IGNORE inbound raw MIDI CC — mode/waveshape control now arrives
+  // as manufacturer SysEx 0x10 (see OnSysEx).  Raw CC 1/3/4/5/6 collide with the
+  // standard controllers a DAW sends to every MIDI output on transport start
+  // (e.g. FL Studio), which would corrupt the engine's per-layer state.
+  (void) channel;
+  // Debug output (harmless — shows the DAW's CC noise but no longer applies it).
+  Serial.print("CC ignored:");
   Serial.print(control);
   Serial.print(" | value: ");
   Serial.print(value);

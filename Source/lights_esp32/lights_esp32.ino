@@ -476,7 +476,12 @@ void OnNoteOff(byte channel, byte note, byte velocity) {
 }
 
 void OnControlChange(byte channel, byte control, byte value) {
-  engine.handleControlChange(channel, control, value);
+  // Intentionally IGNORE inbound raw MIDI CC.  Mode/waveshape control now arrives
+  // as manufacturer SysEx 0x10 (see OnSysEx), because raw CC 1/3/4/5/6 collide
+  // with the standard controllers a DAW blasts to every MIDI output on transport
+  // start (e.g. FL Studio), which would otherwise corrupt the engine's per-layer
+  // mode/waveshape/transient state.  Notes and SysEx are handled elsewhere.
+  (void) channel; (void) control; (void) value;
 }
 
 // SysEx 0x0F: set persistent device name.  `nameBytes` points at the ASCII name

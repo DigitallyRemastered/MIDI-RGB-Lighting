@@ -98,18 +98,29 @@ struct CometState {
 // Layer Modes
 // ============================================================================
 
+// Mask modes — passive, NOT note-driven.  A layer's spatial appearance.
+// Note-triggered effects live in TransientMode below and are applied on top.
 enum LayerMode {
     MODE_OFF             = 0,  // Layer produces no output (distinct from enabled=false)
     MODE_SOLID           = 1,  // Pure panel evaluation — no procedural motion
     MODE_MOVING_DOTS     = 2,  // Moving line segments
     MODE_COMETS          = 3,  // Comet trails with brightness fade
-    MODE_FLASH           = 4,  // Random single-LED flash each frame
-    MODE_GRAVITY_COMET   = 5,  // Note-triggered comet under gravity physics
-    MODE_NOTE_GATE       = 6,  // Solid pattern, opacity gated by held notes on the layer's channel
-    MODE_BRIGHTNESS_SPIKE= 7,  // Note On slams brightness up, then decays (velocity-sensitive)
-    MODE_SAT_SPIKE       = 8,  // Note On pushes saturation to full, then decays
-    MODE_HUE_SPIKE       = 9,  // Note On rotates hue, then eases back
-    MODE_FIREBALL        = 10  // Note On launches a comet up the strip that burns out at the top
+    MODE_FLASH           = 4   // Random single-LED flash each frame
+};
+
+// Transient modes — note-driven effects applied ON TOP of a layer after its
+// hue/sat/val/mask have been computed.  A layer can run one transient alongside
+// any mask mode.  TRANSIENT_NONE (0) means no note effect.  Layer 0 (channel 1)
+// is special: its transient is applied to the composited output (global), not to
+// layer 0's own buffer — see LightEngine::render().
+enum TransientMode {
+    TRANSIENT_NONE            = 0,  // No note effect
+    TRANSIENT_OPACITY_SPIKE   = 1,  // Held-note gate: ramp layer opacity base->target and back
+    TRANSIENT_BRIGHTNESS_SPIKE= 2,  // Ramp brightness base->target while held
+    TRANSIENT_SAT_SPIKE       = 3,  // Ramp saturation base->target while held
+    TRANSIENT_HUE_SPIKE       = 4,  // Rotate hue by target while held
+    TRANSIENT_FIREBALL        = 5,  // Note On launches a constant-velocity comet up the strip
+    TRANSIENT_GRAVITY_COMET   = 6   // Note On launches a comet under gravity physics
 };
 
 // ============================================================================
@@ -127,11 +138,33 @@ struct Layer {
     TemporalConfig motionOffsetTemporal;        // start-LED offset for dots/comets modes
     TemporalConfig motionLengthTemporal;        // segment length for dots/comets modes
     TemporalConfig opacityTemporal;            // layer blend weight (offset=base opacity)
-    CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (GravityComet / Fireball)
+    CometState     comets[MAX_COMET_POLY];     // Polyphonic comet slots (Fireball / GravityComet transients)
 
-    // Note-triggered transient state — runtime only, NOT serialized (like comets[]).
-    float          spikeLevel;                 // 0..1 envelope: set on Note On, decays each frame (spike modes)
-    uint8_t        heldCount;                  // notes currently held on this layer's channel (NoteGate mode)
+    // ---- Transient (note-driven) config — serialized (8 bytes) ----
+    uint8_t        transientMode;          // TransientMode (0 = None)
+    uint8_t        transientTarget;        // 0-127: opacity/brightness/sat target, or hue rotation amount
+    uint8_t        transientAttackPeriod;  // period index (periodIndexToBeats) for the base->target ramp
+    uint8_t        transientDecayPeriod;   // period index for the target->base ramp after release
+    uint8_t        transientFlags;         // bit0 = attack bypass (instant), bit1 = decay bypass (instant)
+    uint8_t        fireballBaseSpeed;      // 0-127: Fireball launch speed floor
+    uint8_t        fireballSpeedRange;     // 0-127: extra Fireball speed scaled by note velocity
+    uint8_t        fireballTailLen;        // 0-127 (>=1 at use): trailing fade length (Fireball / GravityComet)
+
+    // ---- Transient runtime state — NOT serialized (like comets[]) ----
+    float          envLevel;               // 0..1 ADSR envelope position (0 = base, 1 = target)
+    // Per-note held state (128 bits) for this layer's channel — drives the ADSR
+    // envelope (attack while any note held, decay when none).  A SET, not a
+    // counter: setting/clearing a note bit is idempotent, so a duplicate Note On
+    // never double-counts and a dropped Note Off self-heals the next time that
+    // note is replayed (a counter would accumulate the lost decrement forever,
+    // leaving the transient stuck on).
+    uint32_t       heldNotes[4];
+};
+
+// Transient flag bits (Layer::transientFlags)
+enum TransientFlagBits {
+    TRANSIENT_FLAG_ATTACK_BYPASS = 1 << 0,  // ramp to target instantly on Note On
+    TRANSIENT_FLAG_DECAY_BYPASS  = 1 << 1   // return to base instantly on Note Off
 };
 
 // ============================================================================
@@ -202,6 +235,17 @@ public:
      *          costs 16 UDP datagrams instead of up to ~320 — critical for rtpMIDI,
      *          whose recovery journal does not cover SysEx (lost packets are gone
      *          for good, so fewer packets per sync means fewer chances to lose one).
+     *   0x04 - Transient config for one layer: [F0, 7D, 04, layerIdx,
+     *          transientMode, target, attackPeriod, decayPeriod, flags,
+     *          fbSpeed, fbRange, fbTail, F7].  Sets the note-driven transient
+     *          stage (see TransientMode); the plugin sends it on any transient
+     *          knob change and once per layer during a full push.  (0x0D and 0x0F
+     *          are reserved by the firmware for global brightness / device name.)
+     *   0x10 - Set a layer CC (mask mode / waveshape): [F0, 7D, 10, layerIdx,
+     *          cc, value, F7].  Same effect as handleControlChange(layerIdx+1,
+     *          cc, value) but delivered as manufacturer SysEx so it does not
+     *          collide with the standard MIDI CCs a DAW sends on transport start.
+     *          Firmware ignores inbound raw MIDI CC and relies on this instead.
      */
     void handleSysEx(const uint8_t* data, uint16_t length);
 
@@ -247,12 +291,15 @@ public:
 
     /**
      * Get a CC parameter value (0-127) for a specific layer (0-15).
-     * CC 1 = Mode (LayerMode 0-6)
-     * CC 3 = Hue Waveshape  (0-3)
-     * CC 4 = Sat Waveshape  (0-3)
-     * CC 5 = Val Waveshape  (0-3)
+     * CC 1  = Mask Mode (LayerMode 0-4)
+     * CC 3  = Hue Waveshape  (0-3)
+     * CC 4  = Sat Waveshape  (0-3)
+     * CC 5  = Val Waveshape  (0-3)
+     * CC 20 = Transient Mode (TransientMode 0-6) — moved off CC 6, which DAWs
+     *         blast on transport start (Data Entry MSB).
      * Opacity and all amplitude/offset/wavelength/phaseShift are set via SysEx
-     * TemporalConfig messages (0x07 full / 0x08 single field).
+     * TemporalConfig messages (0x07 full / 0x08 single field).  The transient
+     * scalar params (target/periods/fireball) are set via SysEx 0x04.
      */
     int  getLayerCC(int layer, int cc) const;
 
@@ -261,13 +308,13 @@ public:
      */
     void setLayerCC(int layer, int cc, int value);
 
-    // Serialized state layout (v6):
+    // Serialized state layout (v7):
     //   [0]    magic   = 0x4C
-    //   [1]    version = 0x06
+    //   [1]    version = 0x07
     //   [2-3]  tempoBPM*10 as uint16, big-endian
     //   [4-5]  active LED count as uint16, big-endian (clamped to [1, MAX_LEDS]
     //          on load; persists the count across power cycles)
-    //   [6..]  16 layers × 116 bytes each:
+    //   [6..]  16 layers × 124 bytes each:
     //            mode(1), opacityTemporal(7)                     =   8 bytes
     //            hue ColorComponent: waveshape(1) + 4×7 TC       =  29 bytes
     //            sat ColorComponent: 29 bytes
@@ -275,9 +322,11 @@ public:
     //            linesTemporal: 7 bytes
     //            motionOffsetTemporal: 7 bytes
     //            motionLengthTemporal: 7 bytes
-    //          = 8 + 3×29 + 7 + 7 + 7 = 116 bytes per layer
-    //   Total: 6 + 16×116 = 1862 bytes
-    static const size_t STATE_SIZE = 1862;
+    //            transient config: 8 bytes (mode, target, attackPeriod,
+    //              decayPeriod, flags, fbSpeed, fbRange, fbTail)
+    //          = 8 + 3×29 + 7 + 7 + 7 + 8 = 124 bytes per layer
+    //   Total: 6 + 16×124 = 1990 bytes
+    static const size_t STATE_SIZE = 1990;
 
     size_t serializeState  (uint8_t* buf, size_t bufLen) const;
     bool   deserializeState(const uint8_t* buf, size_t len);
@@ -390,16 +439,21 @@ private:
     void renderLayer       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void compositeLayersToOutput();
 
-    // Mode renderers
+    // Mask-mode renderers
     void renderSolid       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderMovingDots  (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderComets      (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
     void renderFlash       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
-    void renderGravityComet(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
-    void renderBrightnessSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
-    void renderSatSpike       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
-    void renderHueSpike       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
-    void renderFireball       (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+
+    // Transient (note-driven) stage — applied on top of a rendered layer buffer.
+    // updateTransientEnvelope advances the ADSR envelope once per frame per layer.
+    // applyTransient modifies a layer's buffer (and/or effectiveOpacity[]) in place.
+    // applyMasterTransient runs layer 0's transient over the composited output.
+    void updateTransientEnvelope(int layerIdx);
+    void applyTransient    (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+    void applyMasterTransient(const LayerEffectiveParams& ep);
+    void drawFireballComets(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
+    void drawGravityComets (int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep);
 
     // Utility
     void setLED(HSVColor* buf, int index, uint8_t h, uint8_t s, uint8_t v);
@@ -442,15 +496,35 @@ struct ModeInfo {
     uint8_t     maskParams;   // OR of MaskParamFlags — mask targets this mode uses
 };
 
+// Which scalar knobs a transient mode actually uses.  Lets an editor show only the
+// relevant controls for the selected transient (mirrors MaskParamFlags for masks).
+enum TransientParamFlags {
+    TRANSIENT_PARAM_TARGET = 1 << 0,  // target level (opacity/brightness/sat/hue amount)
+    TRANSIENT_PARAM_ATTACK = 1 << 1,  // attack period + bypass
+    TRANSIENT_PARAM_DECAY  = 1 << 2,  // decay period + bypass
+    TRANSIENT_PARAM_SPEED  = 1 << 3,  // fireball base speed + speed range
+    TRANSIENT_PARAM_TAIL   = 1 << 4   // comet tail length (fireball / gravity comet)
+};
+
+struct TransientModeInfo {
+    int         id;
+    const char* name;
+    uint8_t     params;   // OR of TransientParamFlags — knobs this transient uses
+};
+
 // Get parameter metadata for CC 1-19 (returns nullptr if out of range)
 const ParameterInfo* getParameterInfo(int ccNumber);
 
 // Get all parameters (fills *outArray, returns count = 19)
 int getAllParameters(const ParameterInfo** outArray);
 
-// Unified mode metadata (no foreground/background split)
+// Mask-mode metadata
 int             getModeCount();
 const ModeInfo* getModeInfo(int modeId);
+
+// Transient-mode metadata
+int                      getTransientModeCount();
+const TransientModeInfo* getTransientModeInfo(int transientId);
 
 // ============================================================================
 // C API for DLL Export (Windows / shared library)
@@ -516,6 +590,12 @@ LIGHT_ENGINE_EXPORT const char* lightEngine_getModeName (int modeId);
 // OR of MaskParamFlags for the given mode (0 if out of range).  Lets the plugin
 // show only the mask targets that affect the selected mode.
 LIGHT_ENGINE_EXPORT int         lightEngine_getModeMaskParams(int modeId);
+
+// Transient-mode metadata (mirrors the mask-mode exports above).
+LIGHT_ENGINE_EXPORT int         lightEngine_getTransientModeCount();
+LIGHT_ENGINE_EXPORT const char* lightEngine_getTransientModeName (int transientId);
+// OR of TransientParamFlags for the given transient (0 if out of range).
+LIGHT_ENGINE_EXPORT int         lightEngine_getTransientParamFlags(int transientId);
 
 #ifdef __cplusplus
 }

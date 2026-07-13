@@ -28,25 +28,27 @@ const int LightEngine::COLOR_PHASE[64] = {
 };
 
 // ----------------------------------------------------------------------------
-// Note-triggered mode tuning (MODE_BRIGHTNESS_SPIKE .. MODE_FIREBALL)
+// Transient tuning
 // ----------------------------------------------------------------------------
-// Per-frame multiplier for the spike envelope.  At 30 fps, 0.72^9 ≈ 0.05, so a
-// Note On spike fades to ~5% in ~0.3 s — a fast, percussive snap.
-static constexpr float SPIKE_DECAY_PER_FRAME = 0.72f;
-static constexpr float SPIKE_MIN_LEVEL       = 0.01f;  // below this the envelope is cleared
-static constexpr float HUE_SPIKE_RANGE       = 85.0f;  // peak hue rotation, 0-255 units (~120°)
-// Fireball travels up the strip at constant velocity (inches/sec); harder hits go faster.
-static constexpr float FIREBALL_BASE_SPEED   = 60.0f;
-static constexpr float FIREBALL_SPEED_RANGE  = 120.0f;
-static const     int   FIREBALL_TAIL_LEN     = 10;     // LEDs in the trailing brightness fade
+// Fireball / GravityComet speed and tail were per-engine constants; they are now
+// per-layer knobs (Layer::fireballBaseSpeed/SpeedRange/TailLen).  The knob values
+// (0-127) are scaled to physical units by these factors at launch/draw time.
+static constexpr float FIREBALL_SPEED_SCALE = 2.0f;   // inches/sec per knob unit (0-127 -> 0-254 in/s)
+static const     int   COMET_TAIL_MAX       = 64;     // clamp for the per-layer tail-length knob
+
+// Per-layer held-note bitset helpers (Layer::heldNotes, 128 bits).  Idempotent
+// set/clear so duplicate Note Ons don't accumulate and a dropped Note Off
+// self-heals when the note is replayed.
+static inline void heldNoteSet  (Layer& L, uint8_t note) { if (note < 128) L.heldNotes[note >> 5] |=  (1u << (note & 31)); }
+static inline void heldNoteClear(Layer& L, uint8_t note) { if (note < 128) L.heldNotes[note >> 5] &= ~(1u << (note & 31)); }
+static inline bool anyNoteHeld  (const Layer& L) { return (L.heldNotes[0] | L.heldNotes[1] | L.heldNotes[2] | L.heldNotes[3]) != 0u; }
 
 // ============================================================================
 // Parameter Metadata
 // ============================================================================
 
 static const ParameterInfo PARAMETER_TABLE[] = {
-    { 1, "Mode",           "Layer mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash,5=GravityComet,"
-                           "6=NoteGate,7=BrightnessSpike,8=SatSpike,9=HueSpike,10=Fireball)"},
+    { 1, "Mode",           "Mask mode (0=Off,1=Solid,2=MovingDots,3=Comets,4=Flash)"},
     { 3, "Hue Waveshape",  "Spatial waveshape for hue (0=Sawtooth,1=Triangle,2=Square,3=Sine)"},
     { 4, "Sat Waveshape",  "Spatial waveshape for saturation"},
     { 5, "Val Waveshape",  "Spatial waveshape for brightness"}
@@ -62,13 +64,20 @@ static const ModeInfo MODE_TABLE[] = {
     {1,  "Solid",            0},
     {2,  "Moving Dots",      MASK_PARAM_LINES | MASK_PARAM_OFFSET | MASK_PARAM_LENGTH},
     {3,  "Comets",           MASK_PARAM_LINES | MASK_PARAM_OFFSET | MASK_PARAM_LENGTH},
-    {4,  "Flash",            MASK_PARAM_LINES},
-    {5,  "Gravity Comet",    0},
-    {6,  "Note Gate",        0},
-    {7,  "Brightness Spike", 0},
-    {8,  "Saturation Spike", 0},
-    {9,  "Hue Spike",        0},
-    {10, "Fireball",         0}
+    {4,  "Flash",            MASK_PARAM_LINES}
+};
+
+// Transient (note-driven) modes, applied on top of a layer.  params = which
+// scalar knobs the transient uses (TransientParamFlags), so an editor can hide
+// the irrelevant controls.  Keep the order in sync with the TransientMode enum.
+static const TransientModeInfo TRANSIENT_TABLE[] = {
+    {0, "None",             0},
+    {1, "Opacity Spike",    TRANSIENT_PARAM_TARGET | TRANSIENT_PARAM_ATTACK | TRANSIENT_PARAM_DECAY},
+    {2, "Brightness Spike", TRANSIENT_PARAM_TARGET | TRANSIENT_PARAM_ATTACK | TRANSIENT_PARAM_DECAY},
+    {3, "Saturation Spike", TRANSIENT_PARAM_TARGET | TRANSIENT_PARAM_ATTACK | TRANSIENT_PARAM_DECAY},
+    {4, "Hue Spike",        TRANSIENT_PARAM_TARGET | TRANSIENT_PARAM_ATTACK | TRANSIENT_PARAM_DECAY},
+    {5, "Fireball",         TRANSIENT_PARAM_SPEED  | TRANSIENT_PARAM_TAIL},
+    {6, "Gravity Comet",    TRANSIENT_PARAM_TAIL}
 };
 
 const ParameterInfo* getParameterInfo(int ccNumber) {
@@ -89,6 +98,15 @@ int getModeCount() {
 const ModeInfo* getModeInfo(int modeId) {
     if (modeId < 0 || modeId >= getModeCount()) return nullptr;
     return &MODE_TABLE[modeId];
+}
+
+int getTransientModeCount() {
+    return (int)(sizeof(TRANSIENT_TABLE) / sizeof(TRANSIENT_TABLE[0]));
+}
+
+const TransientModeInfo* getTransientModeInfo(int transientId) {
+    if (transientId < 0 || transientId >= getTransientModeCount()) return nullptr;
+    return &TRANSIENT_TABLE[transientId];
 }
 
 // Local helpers used across compositing/render passes.
@@ -136,6 +154,8 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
         initColorComponent(layer.sat, 127, 127);  // sat:  offset=127 (full), wl=127
         initColorComponent(layer.val, 64,  127);  // val:  offset=64  (half), wl=127
         initTemporalConfig(layer.linesTemporal);  layer.linesTemporal.offset = 1;  // 1 line
+        initTemporalConfig(layer.motionOffsetTemporal); layer.motionOffsetTemporal.offset = 0;   // start LED 0
+        initTemporalConfig(layer.motionLengthTemporal); layer.motionLengthTemporal.offset = 16;  // 16-LED segment
         initTemporalConfig(layer.opacityTemporal); layer.opacityTemporal.offset = 0;
         for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
             layer.comets[ci].active   = false;
@@ -143,8 +163,17 @@ LightEngine::LightEngine(int numLeds) : numLeds(numLeds) {
             layer.comets[ci].velocity = 0.0f;
             layer.comets[ci].note     = 0;
         }
-        layer.spikeLevel = 0.0f;
-        layer.heldCount  = 0;
+        // Transient config defaults (no note effect until the user picks one).
+        layer.transientMode         = TRANSIENT_NONE;
+        layer.transientTarget       = 127;  // full opacity/brightness/sat by default
+        layer.transientAttackPeriod = 10;   // note-division index 10 = 1/4 note
+        layer.transientDecayPeriod  = 10;
+        layer.transientFlags        = 0;    // attack + decay both active (ramped)
+        layer.fireballBaseSpeed     = 30;   // ~60 in/s at FIREBALL_SPEED_SCALE=2
+        layer.fireballSpeedRange    = 60;   // up to +120 in/s at full velocity
+        layer.fireballTailLen       = 10;
+        layer.envLevel   = 0.0f;
+        layer.heldNotes[0] = layer.heldNotes[1] = layer.heldNotes[2] = layer.heldNotes[3] = 0u;
     }
 
     memset(activeNotes, 0, sizeof(activeNotes));
@@ -206,16 +235,23 @@ void LightEngine::handleControlChange(uint8_t channel, uint8_t control, uint8_t 
     int li = channel - 1;
     Layer& layer = layers[li];
 
-    // CC 1 = Mode
-    // CC 3 = Hue Waveshape  (0-3)
-    // CC 4 = Sat Waveshape  (0-3)
-    // CC 5 = Val Waveshape  (0-3)
+    // CC 1  = Mask Mode
+    // CC 3  = Hue Waveshape  (0-3)
+    // CC 4  = Sat Waveshape  (0-3)
+    // CC 5  = Val Waveshape  (0-3)
+    // CC 20 = Transient Mode
+    // NOTE: transient mode used CC 6, but DAWs blast CC 6 (Data Entry MSB) on
+    // transport start — FL's "CC 6 = 12" became transientMode 12%7 = 5 (Fireball).
+    // Moved to CC 20 (undefined / general-purpose, not auto-sent by DAWs).  The
+    // wire path for transient config is SysEx 0x04, not this CC — the CC opcodes
+    // here are only used internally (SysEx 0x10 / 0x0C bundle / get/setLayerCC).
     // Opacity is set via SysEx 0x07/0x08 (opacityTemporal, panelId=6).
     switch (control) {
         case 1:  layer.mode          = value % getModeCount(); break;
         case 3:  layer.hue.waveshape = value & 0x03; break;
         case 4:  layer.sat.waveshape = value & 0x03; break;
         case 5:  layer.val.waveshape = value & 0x03; break;
+        case 20: layer.transientMode = value % getTransientModeCount(); break;
         default: break;
     }
 }
@@ -229,16 +265,19 @@ void LightEngine::handleNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) 
     int li = channel - 1;
     Layer& layer = layers[li];
 
-    // Track held notes for this layer's channel (NoteGate mode).  A Note On with
-    // velocity 0 is a Note Off per MIDI running status, so treat it as a release.
-    // Maintained for every mode so switching into NoteGate mid-performance is correct.
-    if (velocity > 0) { if (layer.heldCount < 255) layer.heldCount++; }
-    else if (layer.heldCount > 0) layer.heldCount--;
+    // Track held notes for this layer's channel.  A Note On with velocity 0 is a
+    // Note Off per MIDI running status, so treat it as a release.  The held-note
+    // SET drives the transient ADSR envelope (attack while any note held, decay
+    // when none), and is maintained for every layer regardless of transient mode.
+    if (velocity > 0) heldNoteSet  (layer, note);
+    else              heldNoteClear(layer, note);
 
-    if (velocity == 0) return;  // the effects below trigger only on a real Note On
+    if (velocity == 0) return;  // comet launches below trigger only on a real Note On
 
-    switch (layer.mode) {
-        case MODE_GRAVITY_COMET:
+    // Comet-launching transients spawn a new comet per Note On (envelope-based
+    // transients need nothing here — the envelope follows heldCount each frame).
+    switch (layer.transientMode) {
+        case TRANSIENT_GRAVITY_COMET:
             // Find a free comet slot and launch it toward the note's target LED
             for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
                 if (!layer.comets[ci].active) {
@@ -254,27 +293,20 @@ void LightEngine::handleNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) 
             }
             break;
 
-        case MODE_FIREBALL:
+        case TRANSIENT_FIREBALL:
             // Launch a constant-velocity comet up the strip; harder hits travel faster.
             for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
                 if (!layer.comets[ci].active) {
                     layer.comets[ci].active   = true;
                     layer.comets[ci].position = 0.0f;
-                    layer.comets[ci].velocity = FIREBALL_BASE_SPEED
-                                              + (velocity / 127.0f) * FIREBALL_SPEED_RANGE;
+                    layer.comets[ci].velocity = (layer.fireballBaseSpeed
+                                              + (velocity / 127.0f) * layer.fireballSpeedRange)
+                                              * FIREBALL_SPEED_SCALE;
                     layer.comets[ci].note     = note;
                     break;
                 }
             }
             break;
-
-        case MODE_BRIGHTNESS_SPIKE:
-        case MODE_SAT_SPIKE:
-        case MODE_HUE_SPIKE: {
-            float v = velocity / 127.0f;
-            if (v > layer.spikeLevel) layer.spikeLevel = v;  // retrigger takes the louder hit
-            break;
-        }
 
         default: break;
     }
@@ -284,11 +316,9 @@ void LightEngine::handleNoteOff(uint8_t channel, uint8_t note, uint8_t velocity)
     if (note < 128) {
         activeNotes[note] = 0;
     }
-    // Release a held note for this layer's channel (NoteGate mode).
-    if (channel >= 1 && channel <= 16) {
-        Layer& layer = layers[channel - 1];
-        if (layer.heldCount > 0) layer.heldCount--;
-    }
+    // Release a held note for this layer's channel (drives the transient envelope decay).
+    if (channel >= 1 && channel <= 16)
+        heldNoteClear(layers[channel - 1], note);
     // GravityComet / Fireball comets keep moving under their own motion; they
     // self-deactivate (gravity comet falls back to base, fireball burns past the top).
     (void)velocity;
@@ -303,10 +333,11 @@ int LightEngine::getLayerCC(int layer, int cc) const {
     const Layer& l = layers[layer];
 
     switch (cc) {
-        case 1: return l.mode;
-        case 3: return l.hue.waveshape;
-        case 4: return l.sat.waveshape;
-        case 5: return l.val.waveshape;
+        case 1:  return l.mode;
+        case 3:  return l.hue.waveshape;
+        case 4:  return l.sat.waveshape;
+        case 5:  return l.val.waveshape;
+        case 20: return l.transientMode;  // moved off CC 6 (DAW Data Entry) — see handleControlChange
         default: return 0;
     }
 }
@@ -367,7 +398,7 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
     size_t i = 0;
 
     buf[i++] = 0x4C;  // magic
-    buf[i++] = 0x06;  // version (v6: adds active LED count)
+    buf[i++] = 0x07;  // version (v7: adds per-layer transient config)
 
     // tempoBPM as uint16 (BPM*10), big-endian
     uint16_t bpmFixed = (uint16_t)(tempoBPM * 10.0f + 0.5f);
@@ -389,6 +420,15 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
         i += serializeTC(buf + i, layer.linesTemporal);
         i += serializeTC(buf + i, layer.motionOffsetTemporal);
         i += serializeTC(buf + i, layer.motionLengthTemporal);
+        // Transient config (8 bytes)
+        buf[i++] = layer.transientMode;
+        buf[i++] = layer.transientTarget;
+        buf[i++] = layer.transientAttackPeriod;
+        buf[i++] = layer.transientDecayPeriod;
+        buf[i++] = layer.transientFlags;
+        buf[i++] = layer.fireballBaseSpeed;
+        buf[i++] = layer.fireballSpeedRange;
+        buf[i++] = layer.fireballTailLen;
     }
 
     return i;  // == STATE_SIZE
@@ -397,7 +437,7 @@ size_t LightEngine::serializeState(uint8_t* buf, size_t bufLen) const {
 bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
     if (!buf || len < STATE_SIZE) return false;  // length first: never read past caller's buffer
     if (buf[0] != 0x4C) return false;
-    if (buf[1] != 0x06) return false;
+    if (buf[1] != 0x07) return false;
 
     size_t i = 2;
 
@@ -421,6 +461,19 @@ bool LightEngine::deserializeState(const uint8_t* buf, size_t len) {
         i += deserializeTC(buf + i, layer.linesTemporal);
         i += deserializeTC(buf + i, layer.motionOffsetTemporal);
         i += deserializeTC(buf + i, layer.motionLengthTemporal);
+        // Transient config (8 bytes)
+        uint8_t tm = buf[i++];
+        layer.transientMode         = (tm < getTransientModeCount()) ? tm : (uint8_t)TRANSIENT_NONE;
+        layer.transientTarget       = buf[i++];
+        layer.transientAttackPeriod = buf[i++];
+        layer.transientDecayPeriod  = buf[i++];
+        layer.transientFlags        = buf[i++];
+        layer.fireballBaseSpeed     = buf[i++];
+        layer.fireballSpeedRange    = buf[i++];
+        layer.fireballTailLen       = buf[i++];
+        // Reset runtime envelope + held notes (not serialized) so a load starts from base.
+        layer.envLevel  = 0.0f;
+        layer.heldNotes[0] = layer.heldNotes[1] = layer.heldNotes[2] = layer.heldNotes[3] = 0u;
     }
 
     return true;
@@ -439,23 +492,45 @@ void LightEngine::render() {
         return;
     }
 
+    // Layer 0's transient (if any) is applied to the composited output rather than
+    // to layer 0's own buffer — notes on channel 1 act globally.  Defer it until
+    // after compositing.
+    bool masterTransient = false;
+
     for (int li = 0; li < MAX_LAYERS; li++) {
-        if (layers[li].mode == MODE_OFF) continue;
+        Layer& L = layers[li];
+        const bool hasMask      = (L.mode != MODE_OFF);
+        const bool hasTransient = (L.transientMode != TRANSIENT_NONE);
+
+        if (!hasMask && !hasTransient) { effectiveOpacity[li] = 0.0f; continue; }
 
         LayerEffectiveParams ep;
         applyTimeModulationForLayer(li, ep);
         effectiveOpacity[li] = ep.opacity;
 
-        // NoteGate: layer stays dark until a note is held on its channel, then
-        // shows the opacity it would otherwise have had.
-        if (layers[li].mode == MODE_NOTE_GATE && layers[li].heldCount == 0)
-            effectiveOpacity[li] = 0.0f;
+        // Advance the ADSR envelope every frame (even with no mask) so switching
+        // modes or releasing notes mid-ramp behaves smoothly.
+        updateTransientEnvelope(li);
 
         memset(layerBuffers[li], 0, numLeds * sizeof(HSVColor));
-        renderLayer(li, layerBuffers[li], ep);
+        if (hasMask)
+            renderLayer(li, layerBuffers[li], ep);
+
+        // Per-layer transients modify this layer's buffer / opacity in place.
+        // Layer 0's transient is global and handled after compositing.
+        if (hasTransient) {
+            if (li == 0) masterTransient = true;
+            else         applyTransient(li, layerBuffers[li], ep);
+        }
     }
 
     compositeLayersToOutput();
+
+    if (masterTransient) {
+        LayerEffectiveParams ep0;
+        applyTimeModulationForLayer(0, ep0);
+        applyMasterTransient(ep0);
+    }
 }
 
 void LightEngine::applyTimeModulationForLayer(int layerIdx, LayerEffectiveParams& out) const {
@@ -484,17 +559,11 @@ void LightEngine::applyTimeModulationForLayer(int layerIdx, LayerEffectiveParams
 
 void LightEngine::renderLayer(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     switch (layers[layerIdx].mode) {
-        case MODE_SOLID:         renderSolid       (layerIdx, buf, ep); break;
-        case MODE_MOVING_DOTS:   renderMovingDots  (layerIdx, buf, ep); break;
-        case MODE_COMETS:        renderComets      (layerIdx, buf, ep); break;
-        case MODE_FLASH:         renderFlash       (layerIdx, buf, ep); break;
-        case MODE_GRAVITY_COMET: renderGravityComet(layerIdx, buf, ep); break;
-        case MODE_NOTE_GATE:     renderSolid       (layerIdx, buf, ep); break;  // gating done via effectiveOpacity
-        case MODE_BRIGHTNESS_SPIKE: renderBrightnessSpike(layerIdx, buf, ep); break;
-        case MODE_SAT_SPIKE:        renderSatSpike       (layerIdx, buf, ep); break;
-        case MODE_HUE_SPIKE:        renderHueSpike       (layerIdx, buf, ep); break;
-        case MODE_FIREBALL:         renderFireball       (layerIdx, buf, ep); break;
-        default: break;
+        case MODE_SOLID:         renderSolid     (layerIdx, buf, ep); break;
+        case MODE_MOVING_DOTS:   renderMovingDots(layerIdx, buf, ep); break;
+        case MODE_COMETS:        renderComets    (layerIdx, buf, ep); break;
+        case MODE_FLASH:         renderFlash     (layerIdx, buf, ep); break;
+        default: break;  // MODE_OFF is filtered before this call
     }
 }
 
@@ -761,17 +830,86 @@ void LightEngine::renderFlash(int layerIdx, HSVColor* buf, const LayerEffectiveP
     }
 }
 
-void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+// ============================================================================
+// Transient (note-driven) Stage
+// ============================================================================
+// Applied on top of a layer AFTER its hue/sat/val/mask have been rendered into
+// the buffer.  Spike transients ramp a channel from its base toward a target via
+// an ADSR envelope (attack while held, decay once released); comet transients
+// draw note-launched comets over the buffer.  Layer 0's transient runs on the
+// composited output instead (see applyMasterTransient).
+
+// Advance the ADSR envelope one frame.  Any note held => attack toward target (1),
+// else decay toward base (0).  Attack/decay periods are beat-based; either ramp
+// can be bypassed for an instant jump.  Called once per frame per live layer.
+void LightEngine::updateTransientEnvelope(int layerIdx) {
+    Layer& L = layers[layerIdx];
+
+    if (anyNoteHeld(L)) {
+        if (L.transientFlags & TRANSIENT_FLAG_ATTACK_BYPASS) { L.envLevel = 1.0f; return; }
+        float frames = periodIndexToBeats(L.transientAttackPeriod) * 60.0f * FRAME_RATE / tempoBPM;
+        if (frames < 1.0f) frames = 1.0f;
+        L.envLevel += 1.0f / frames;
+        if (L.envLevel > 1.0f) L.envLevel = 1.0f;
+    } else {
+        if (L.transientFlags & TRANSIENT_FLAG_DECAY_BYPASS) { L.envLevel = 0.0f; return; }
+        float frames = periodIndexToBeats(L.transientDecayPeriod) * 60.0f * FRAME_RATE / tempoBPM;
+        if (frames < 1.0f) frames = 1.0f;
+        L.envLevel -= 1.0f / frames;
+        if (L.envLevel < 0.0f) L.envLevel = 0.0f;
+    }
+}
+
+// Comet-tail length for the per-layer knob, clamped to a sane draw range.
+static inline int cometTail(uint8_t knob) {
+    int t = (int)knob;
+    if (t < 1)             t = 1;
+    if (t > COMET_TAIL_MAX) t = COMET_TAIL_MAX;
+    return t;
+}
+
+// Fireball: constant-velocity comets travelling up the strip (launched in
+// handleNoteOn).  Tail length is the per-layer knob; colour from the panels.
+void LightEngine::drawFireballComets(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
     const Layer& layer = layers[layerIdx];
-    const float dt       = 1.0f / FRAME_RATE;
-    const int   TAIL_LEN = 5;  // Number of LEDs in the trailing brightness fade
+    const float  dt    = 1.0f / FRAME_RATE;
+    const int    tail  = cometTail(layer.fireballTailLen);
 
     for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
         CometState& comet = layers[layerIdx].comets[ci];
         if (!comet.active) continue;
 
-        // Physics step: constant downward acceleration
-        comet.velocity -= GRAVITY_IN_PER_S2 * dt;
+        comet.position += comet.velocity * dt;  // constant upward velocity, no gravity
+        int headIdx = (int)(comet.position / LED_SPACING_INCHES);
+
+        // Burned out once the whole tail has travelled past the top of the strip.
+        if (headIdx - (tail - 1) >= numLeds) { comet.active = false; continue; }
+
+        for (int t = 0; t < tail; t++) {
+            int idx = headIdx - t;
+            if (idx < 0) break;            // tail has not yet emerged from the base
+            if (idx >= numLeds) continue;  // this part of the head is past the top
+            float brightness = (float)(tail - t) / (float)tail;  // head brightest
+            uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
+            uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
+            uint8_t v = clamp(evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
+            setLED(buf, idx, h, s, v);
+        }
+    }
+}
+
+// Gravity Comet: note-launched comets under gravity that fall back to the base
+// (launched in handleNoteOn).  Tail length is the per-layer knob.
+void LightEngine::drawGravityComets(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+    const Layer& layer = layers[layerIdx];
+    const float  dt    = 1.0f / FRAME_RATE;
+    const int    tail  = cometTail(layer.fireballTailLen);
+
+    for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
+        CometState& comet = layers[layerIdx].comets[ci];
+        if (!comet.active) continue;
+
+        comet.velocity -= GRAVITY_IN_PER_S2 * dt;  // constant downward acceleration
         comet.position += comet.velocity * dt;
 
         // Deactivate when comet returns to base after having launched
@@ -785,11 +923,10 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
         int headIdx = (int)(comet.position / LED_SPACING_INCHES);
         if (headIdx >= numLeds) headIdx = numLeds - 1;
 
-        // Draw head + trailing tail with linearly decreasing brightness
-        for (int t = 0; t < TAIL_LEN; t++) {
+        for (int t = 0; t < tail; t++) {
             int idx = headIdx - t;
             if (idx < 0) break;
-            float brightness = (float)(TAIL_LEN - t) / (float)TAIL_LEN;
+            float brightness = (float)(tail - t) / (float)tail;
             uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
             uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
             uint8_t v = wrap (evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
@@ -798,88 +935,103 @@ void LightEngine::renderGravityComet(int layerIdx, HSVColor* buf, const LayerEff
     }
 }
 
-// Note-triggered transient modes ---------------------------------------------
-// All three "spike" modes render the layer's normal spatial pattern, then apply
-// a per-layer envelope that is slammed to (velocity/127) on Note On and decays
-// each frame.  spikeLevel is decayed once here per frame (renderLayer runs once
-// per layer per frame).  Brightness/saturation use clamp() so the boost saturates
-// at full rather than wrapping back to dark; hue uses wrap() since it is circular.
+// Apply a layer's transient on top of its rendered buffer.  The spike modes
+// interpolate a channel base->target by envLevel; only LEDs the mask actually lit
+// (v != 0) are affected, so the transient rides the visible pattern.  target is a
+// 0-127 knob; brightness/sat/hue scale it into the 0-254 domain (×2).
+void LightEngine::applyTransient(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
+    Layer& L = layers[layerIdx];
+    const float env    = L.envLevel;
+    const float target = (float)L.transientTarget;
 
-void LightEngine::renderBrightnessSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
-    Layer& layer = layers[layerIdx];
-    layer.spikeLevel *= SPIKE_DECAY_PER_FRAME;
-    if (layer.spikeLevel < SPIKE_MIN_LEVEL) layer.spikeLevel = 0.0f;
-    const float level = layer.spikeLevel;
+    switch (L.transientMode) {
+        case TRANSIENT_OPACITY_SPIKE:
+            // Modulate the layer's blend weight base(ep.opacity)->target opacity.
+            effectiveOpacity[layerIdx] = ep.opacity + env * (target - ep.opacity);
+            break;
 
-    for (int i = 0; i < numLeds; i++) {
-        uint8_t h = wrap (evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-        uint8_t s = wrap (evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-        float vbase = evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase);
-        uint8_t v = clamp(vbase + level * (254.0f - vbase));  // spike toward full brightness
-        setLED(buf, i, h, s, v);
-    }
-}
-
-void LightEngine::renderSatSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
-    Layer& layer = layers[layerIdx];
-    layer.spikeLevel *= SPIKE_DECAY_PER_FRAME;
-    if (layer.spikeLevel < SPIKE_MIN_LEVEL) layer.spikeLevel = 0.0f;
-    const float level = layer.spikeLevel;
-
-    for (int i = 0; i < numLeds; i++) {
-        uint8_t h = wrap (evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-        float sbase = evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase);
-        uint8_t s = clamp(sbase + level * (254.0f - sbase));  // spike toward full saturation
-        uint8_t v = wrap (evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
-        setLED(buf, i, h, s, v);
-    }
-}
-
-void LightEngine::renderHueSpike(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
-    Layer& layer = layers[layerIdx];
-    layer.spikeLevel *= SPIKE_DECAY_PER_FRAME;
-    if (layer.spikeLevel < SPIKE_MIN_LEVEL) layer.spikeLevel = 0.0f;
-    const float hueShift = layer.spikeLevel * HUE_SPIKE_RANGE;  // rotates out and eases back
-
-    for (int i = 0; i < numLeds; i++) {
-        float hbase = evalPanel(layer.hue, i, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase);
-        uint8_t h = wrap (hbase + hueShift);
-        uint8_t s = wrap (evalPanel(layer.sat, i, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-        uint8_t v = wrap (evalPanel(layer.val, i, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase));
-        setLED(buf, i, h, s, v);
-    }
-}
-
-// Fireball: each Note On launches a comet up the strip at constant velocity
-// (see handleNoteOn).  Colour comes from the layer's own hue/sat panels; a
-// trailing tail fades the brightness so the head reads as the hottest point.
-void LightEngine::renderFireball(int layerIdx, HSVColor* buf, const LayerEffectiveParams& ep) {
-    const Layer& layer = layers[layerIdx];
-    const float dt = 1.0f / FRAME_RATE;
-
-    for (int ci = 0; ci < MAX_COMET_POLY; ci++) {
-        CometState& comet = layers[layerIdx].comets[ci];
-        if (!comet.active) continue;
-
-        comet.position += comet.velocity * dt;  // constant upward velocity, no gravity
-        int headIdx = (int)(comet.position / LED_SPACING_INCHES);
-
-        // Burned out once the whole tail has travelled past the top of the strip.
-        if (headIdx - (FIREBALL_TAIL_LEN - 1) >= numLeds) {
-            comet.active = false;
-            continue;
+        case TRANSIENT_BRIGHTNESS_SPIKE: {
+            const float peak = target * 2.0f;
+            for (int i = 0; i < numLeds; i++) {
+                if (buf[i].v == 0) continue;
+                buf[i].v = clamp((float)buf[i].v + env * (peak - (float)buf[i].v));
+            }
+            break;
         }
-
-        for (int t = 0; t < FIREBALL_TAIL_LEN; t++) {
-            int idx = headIdx - t;
-            if (idx < 0) break;            // tail has not yet emerged from the base
-            if (idx >= numLeds) continue;  // this part of the head is past the top
-            float brightness = (float)(FIREBALL_TAIL_LEN - t) / (float)FIREBALL_TAIL_LEN;  // head brightest
-            uint8_t h = wrap (evalPanel(layer.hue, idx, ep.hueAmp, ep.hueOffset, ep.hueWavelength, ep.huePhase));
-            uint8_t s = wrap (evalPanel(layer.sat, idx, ep.satAmp, ep.satOffset, ep.satWavelength, ep.satPhase));
-            uint8_t v = clamp(evalPanel(layer.val, idx, ep.valAmp, ep.valOffset, ep.valWavelength, ep.valPhase) * brightness);
-            setLED(buf, idx, h, s, v);
+        case TRANSIENT_SAT_SPIKE: {
+            const float peak = target * 2.0f;
+            for (int i = 0; i < numLeds; i++) {
+                if (buf[i].v == 0) continue;
+                buf[i].s = clamp((float)buf[i].s + env * (peak - (float)buf[i].s));
+            }
+            break;
         }
+        case TRANSIENT_HUE_SPIKE: {
+            const float shift = env * target * 2.0f;  // up to a near-full-circle rotation
+            for (int i = 0; i < numLeds; i++) {
+                if (buf[i].v == 0) continue;
+                buf[i].h = wrap((float)buf[i].h + shift);
+            }
+            break;
+        }
+        case TRANSIENT_FIREBALL:      drawFireballComets(layerIdx, buf, ep); break;
+        case TRANSIENT_GRAVITY_COMET: drawGravityComets (layerIdx, buf, ep); break;
+        default: break;
+    }
+}
+
+// Apply layer 0's transient to the composited output (channel-1 notes act
+// globally).  Works on the HSV view leds[] then re-derives the authoritative RGB.
+void LightEngine::applyMasterTransient(const LayerEffectiveParams& ep) {
+    Layer& L = layers[0];
+    const float env    = L.envLevel;
+    const float target = (float)L.transientTarget;
+
+    switch (L.transientMode) {
+        case TRANSIENT_OPACITY_SPIKE: {
+            // Post-composite has no blend weight; interpret opacity as a global
+            // brightness fade toward target/127 (target 127 = no change).
+            float factor = 1.0f + env * (target / 127.0f - 1.0f);
+            if (factor < 0.0f) factor = 0.0f;
+            for (int i = 0; i < numLeds; i++)
+                leds[i].v = clamp((float)leds[i].v * factor);
+            break;
+        }
+        case TRANSIENT_BRIGHTNESS_SPIKE: {
+            const float peak = target * 2.0f;
+            for (int i = 0; i < numLeds; i++) {
+                if (leds[i].v == 0) continue;
+                leds[i].v = clamp((float)leds[i].v + env * (peak - (float)leds[i].v));
+            }
+            break;
+        }
+        case TRANSIENT_SAT_SPIKE: {
+            const float peak = target * 2.0f;
+            for (int i = 0; i < numLeds; i++) {
+                if (leds[i].v == 0) continue;
+                leds[i].s = clamp((float)leds[i].s + env * (peak - (float)leds[i].s));
+            }
+            break;
+        }
+        case TRANSIENT_HUE_SPIKE: {
+            const float shift = env * target * 2.0f;
+            for (int i = 0; i < numLeds; i++) {
+                if (leds[i].v == 0) continue;
+                leds[i].h = wrap((float)leds[i].h + shift);
+            }
+            break;
+        }
+        case TRANSIENT_FIREBALL:      drawFireballComets(0, leds, ep); break;
+        case TRANSIENT_GRAVITY_COMET: drawGravityComets (0, leds, ep); break;
+        default: return;  // nothing changed — leave rgbOut untouched
+    }
+
+    // Re-quantize the authoritative RGB from the transformed HSV composite.
+    for (int i = 0; i < numLeds; i++) {
+        RGBf c = hsvToRgbF(leds[i].h, leds[i].s, leds[i].v);
+        rgbOut[i].r = (uint8_t)(c.r * 255.0f + 0.5f);
+        rgbOut[i].g = (uint8_t)(c.g * 255.0f + 0.5f);
+        rgbOut[i].b = (uint8_t)(c.b * 255.0f + 0.5f);
     }
 }
 
@@ -1016,6 +1168,43 @@ void LightEngine::handleSysEx(const uint8_t* data, uint16_t length) {
             }
             break;
         }
+
+        case 0x04: {  // Transient config for one layer:
+            // [F0, 7D, 04, layerIdx, transientMode, target, attackPeriod,
+            //  decayPeriod, flags, fbSpeed, fbRange, fbTail, F7]
+            // NOTE: 0x0D is taken by the firmware for global brightness, 0x0F for
+            // device name — transient config uses the otherwise-unused 0x04.
+            if (length >= (uint16_t)(offset + 12)) {
+                int li = (int)data[offset + 2];
+                if (li >= 0 && li <= 15) {
+                    Layer& layer = layers[li];
+                    uint8_t tm = data[offset + 3];
+                    layer.transientMode         = (tm < getTransientModeCount()) ? tm : (uint8_t)TRANSIENT_NONE;
+                    layer.transientTarget       = data[offset + 4];
+                    layer.transientAttackPeriod = data[offset + 5];
+                    layer.transientDecayPeriod  = data[offset + 6];
+                    layer.transientFlags        = data[offset + 7];
+                    layer.fireballBaseSpeed     = data[offset + 8];
+                    layer.fireballSpeedRange    = data[offset + 9];
+                    layer.fireballTailLen       = data[offset + 10];
+                }
+            }
+            break;
+        }
+
+        case 0x10:  // Set a layer CC (mask mode / waveshape) without raw MIDI CC.
+            // [F0, 7D, 10, layerIdx, cc, value, F7].  The plugin used to drive
+            // mode/waveshape via raw MIDI CC 1/3/4/5, but those collide with the
+            // standard controllers a DAW blasts on transport start (e.g. FL sends
+            // CC 1/3/4/5/6), corrupting the engine.  Routing them through this
+            // manufacturer-SysEx keeps them off the shared CC bus.  cc maps as in
+            // handleControlChange (1=mask mode, 3/4/5=hue/sat/val waveshape).
+            if (length >= (uint16_t)(offset + 6)) {
+                int li = (int)data[offset + 2];
+                if (li >= 0 && li <= 15)
+                    handleControlChange((uint8_t)(li + 1), data[offset + 3], data[offset + 4]);
+            }
+            break;
 
         case 0x0A: {  // Full-state sync fragment: [F0, 7D, 0A, seq, total, payload..., F7]
             const int fragBytes = (int)length - offset - 3;  // seq + total + payload (excludes F7)
@@ -1278,6 +1467,20 @@ const char* lightEngine_getModeName(int modeId) {
 int lightEngine_getModeMaskParams(int modeId) {
     const ModeInfo* info = getModeInfo(modeId);
     return info ? info->maskParams : 0;
+}
+
+int lightEngine_getTransientModeCount() {
+    return getTransientModeCount();
+}
+
+const char* lightEngine_getTransientModeName(int transientId) {
+    const TransientModeInfo* info = getTransientModeInfo(transientId);
+    return info ? info->name : "";
+}
+
+int lightEngine_getTransientParamFlags(int transientId) {
+    const TransientModeInfo* info = getTransientModeInfo(transientId);
+    return info ? info->params : 0;
 }
 
 } // extern "C"
