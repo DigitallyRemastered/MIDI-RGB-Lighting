@@ -6,6 +6,7 @@ Lighting
 Control individually addressable LEDs using the FastLED library and MIDI. Supports **Teensy** (USB-MIDI) and **ESP32** (WiFi/BLE-MIDI).
 
 https://github.com/user-attachments/assets/a2517aeb-3479-4f27-bc56-3e1d3fea39d8
+
 Thanks to [PCBWay](https://www.pcbway.com/) for providing their PCB manufacturing services after finding this repo. Their service was thorough and easy.
 
 See a demo and video of construction here: https://www.youtube.com/watch?v=1hBeVJ6QlaU
